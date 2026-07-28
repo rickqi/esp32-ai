@@ -1,0 +1,860 @@
+# 完整上手教程：在 ESP32-S3 上运行 28.9M 参数语言模型
+
+> 适用人群：**从未使用过 ESP32 的初学者**
+> 硬件方案：
+>   - 通用 ESP32-S3 N16R8 开发板：约 ¥80-120 / $10-15
+>   - **Waveshare ESP32-S3-RLCD-4.2（全反射屏开发板）：约 ¥170-220 / $25-30**
+> 预计总耗时：首次约 2-4 小时（含工具安装 + 数据准备 + 编译烧录）
+
+---
+
+## 目录
+
+1. [项目简介](#1-项目简介)
+2. [硬件清单](#2-硬件清单)
+3. [硬件接线](#3-硬件接线)
+4. [Windows 工具链安装](#4-windows-工具链安装)
+5. [项目依赖安装](#5-项目依赖安装)
+6. [数据准备](#6-数据准备)
+7. [训练模型（可选）](#7-训练模型可选)
+8. [量化与导出](#8-量化与导出)
+9. [生成 vocab.h](#9-生成-vocabh)
+10. [主机端验证](#10-主机端验证)
+11. [编译固件](#11-编译固件)
+12. [烧录到 ESP32-S3](#12-烧录到-esp32-s3)
+13. [运行与调试](#13-运行与调试)
+14. [接线图与屏幕设置](#14-接线图与屏幕设置)
+15. [性能指标](#15-性能指标)
+16. [完整故障排查表](#16-完整故障排查表)
+17. [执行检查清单](#17-执行检查清单)
+18. [命令速查表](#18-命令速查表)
+
+---
+
+## 1. 项目简介
+
+这个项目让一个 **28.9M 参数的语言模型** 在价格约 **$8（¥60）** 的 **ESP32-S3 微控制器** 上运行。
+
+**关键数字：**
+| 指标 | 数值 |
+|---|---|
+| 参数量 | 28.9M（其中 25M 存储在 Flash 查找表中） |
+| 芯片 | ESP32-S3 N16R8，512KB SRAM + 8MB PSRAM + 16MB Flash |
+| 推理速度 | ~9.5 tok/s（端到端） |
+| 模型体积 | 14.9MB（4-bit 量化） |
+| 网络连接 | 无，一切在设备本地运行 |
+| 领域 | TinyStories（短篇故事生成） |
+
+**原理简述：**
+- **SRAM**（512KB，极快）：常驻密集核心（~559K 参数），每个 token 都参与计算
+- **PSRAM**（8MB，中等）：存放输出头 + KV cache + 工作区
+- **Flash**（16MB，大但慢）：25M 参数的 PLE 查找表，每个 token 只读取约 6 行（~450 字节）
+
+这比之前在同类芯片上运行的模型（260K 参数）多承载了约 **110 倍** 的参数。
+
+---
+
+## 2. 硬件清单
+
+### 必需硬件
+
+| 配件 | 硬性要求 | 参考价格 | 购买说明 |
+|---|---|---|---|
+| **ESP32-S3 开发板** | **必须 N16R8**（16MB Flash + 8MB PSRAM） | ¥50-70 | ⚠️ 买错 N8R2 版本会导致模型放不下！常见型号：合宙 ESP32-S3 N16R8、ESP32-S3-DevKitC-1 N16R8 |
+| **Waveshare ESP32-S3-RLCD-4.2** | 自带 4.2寸全反射 RLCD 屏 + 音频 + SD 卡 + 传感器 | ¥160-200 | ⚠️ 引脚与通用开发板完全不同，见 3.4 节和 14.4 节 |
+| **USB 数据线** | 带数据传输功能 | ¥10 | 很多充电线无法传输数据 |
+| 面包板 + 杜邦线 | 母对母杜邦线 | ¥10 | 用于连接屏幕 |
+
+### 可选硬件
+
+| 配件 | 适用场景 |
+|---|---|
+| **Waveshare ESP32-S3-RLCD-4.2** | 4.2寸全反射 RLCD 屏，自带音频/传感器/SD卡槽 | ¥160-200 | ⚠️ 引脚映射与通用 ESP32-S3 不同，见 14.4 节 |
+| **0.96" I2C OLED（SSD1306）** 或 **1.3" I2C OLED（SH1106）** | 在屏幕上看故事，不依赖电脑 |
+| **2.0" 240x320 SPI TFT（ST7789）** | 更好的彩色显示效果 |
+
+### 推荐的购买组合
+
+**新手套装（¥100-120）：**
+- ESP32-S3 N16R8 开发板 × 1
+- USB-C 数据线 × 1
+- 0.96寸 OLED 屏幕 × 1
+- 面包板 + 母对母杜邦线 × 1套
+
+**极简组合（¥70-90）：** 只买 ESP32-S3 开发板 + 数据线，故事在电脑上查看。
+
+---
+
+## 3. 硬件接线
+
+### 方案 A：不接屏幕（串口输出，最简单，推荐首次尝试）
+
+只需用 USB 数据线把 ESP32 连接到电脑。生成的故事会在电脑的串口监视器中显示。
+
+### 方案 B：接 I2C OLED 屏幕（4 根杜邦线）
+
+```
+OLED           ESP32-S3 引脚
+───           ──────────
+GND     ────  GND
+VCC     ────  3V3
+SCL     ────  GPIO 46
+SDA     ────  GPIO 18
+```
+
+**接线步骤：**
+1. OLED 屏幕排针朝上插入面包板一侧
+2. ESP32-S3 插入面包板另一侧，注意两排引脚分别插入不同排
+3. 用母对母杜邦线将四根线对应连接
+
+### 方案 C：接 SPI TFT 彩屏（2寸 ST7789）
+
+```
+TFT 引脚     ESP32-S3 引脚
+────────     ──────────
+TFT_CS   ────  GPIO 10
+TFT_DC   ────  GPIO 7
+TFT_RST  ────  GPIO 6
+TFT_SCK  ────  GPIO 12
+TFT_MOSI ────  GPIO 11
+VCC      ────  3V3
+GND      ────  GND
+```
+
+### 方案 D：使用 Waveshare ESP32-S3-RLCD-4.2（自带 RLCD 屏，**无需额外接线**）
+
+> ⚠️ **Waveshare RLCD-4.2 与通用 ESP32-S3 开发板的引脚分配完全不同。如果你用的是这块板，不要按方案 A/C 接线——它的屏幕已板上集成。**
+
+**Waveshare ESP32-S3-RLCD-4.2** 是一块自含式开发板，搭载了 4.2 寸全反射式单色 LCD（RLCD）、双麦克风阵列、扬声器、音频编解码器（ES8311/ES7210）、SHTC3 温湿度传感器、Micro SD 卡槽、PCF85063 RTC、18650 电池座以及两颗自定义按键。
+
+**因为屏幕已经焊在板子上，不需要面包板和杜邦线。** 只需用 USB-C 数据线将板子连接到电脑即可。
+
+#### 板上引脚分配（与通用 ESP32-S3 完全不同）
+
+| GPIO | 功能 |
+|---|---|
+| GPIO0  | BOOT 按键（低电平有效） |
+| GPIO4  | 18650 电池 ADC（3 倍分压） |
+| GPIO5  | RLCD **DC**（数据/命令选择） |
+| GPIO8  | I²S DOUT（扬声器） |
+| GPIO9  | I²S BCLK |
+| GPIO10 | I²S DIN（麦克风） |
+| GPIO11 | RLCD SPI **CLK** |
+| GPIO12 | RLCD SPI **MOSI** |
+| GPIO13 | I²C SDA（传感器/音频共用） |
+| GPIO14 | I²C SCL |
+| GPIO16 | I²S MCLK |
+| GPIO18 | KEY 按键（低电平有效） |
+| GPIO40 | RLCD **CS**（片选） |
+| GPIO41 | RLCD **RESET** |
+| GPIO45 | I²S LRCLK |
+| GPIO46 | 扬声器功放使能 |
+
+#### ⚠️ 引脚冲突警告
+
+RLCD 使用的 SPI 引脚是 **GPIO11 (CLK)** 和 **GPIO12 (MOSI)**，而通用 ESP32-S3 开发板通常默认用 GPIO36/37/46 等作为 SPI。这意味着 **Waveshare 板的 SPI 引脚完全不一致**，配置 display.h 时必须按上表设置，不要照搬通用板的接线图。
+
+---
+
+## 4. Windows 工具链安装
+
+按顺序执行，不要跳步。
+
+### 4.1 Python 3.12+
+
+```powershell
+# 到 python.org 下载 Python 3.12+ 安装包
+# 安装时务必勾选 "Add Python to PATH"
+python --version   # 确认显示 Python 3.12.x
+```
+
+### 4.2 uv（Python 包管理器）
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+# 重启终端后：
+uv --version
+```
+
+### 4.3 Arduino CLI + ESP32 支持
+
+```powershell
+# 1) 下载 arduino-cli
+#    到 https://github.com/arduino/arduino-cli/releases
+#    下载 arduino-cli_latest_Windows_64bit.zip
+#
+# 2) 解压到 D:\arduino-cli\
+#
+# 3) 将此目录加入系统 PATH：
+#    系统属性 → 高级 → 环境变量 → Path → 添加 D:\arduino-cli
+#
+# 4) 重启终端
+arduino-cli version   # 确认显示版本号
+
+# 5) 配置并安装 ESP32 支持（约 500MB 下载）
+arduino-cli config init
+arduino-cli core update-index
+arduino-cli core install esp32:esp32
+```
+
+> ⚠️ 如果 ESP32 安装极慢，尝试用手机热点或换时间段。确保网络稳定。
+
+### 4.4 安装 Arduino 库
+
+```powershell
+arduino-cli lib install "Adafruit GFX Library"
+arduino-cli lib install "Adafruit SH110X"      # 1.3寸 OLED
+arduino-cli lib install "Adafruit SSD1306"     # 0.96寸 OLED
+arduino-cli lib install "Adafruit ST7789"      # TFT 彩屏
+```
+
+> **如果不接屏幕**，只需安装 `Adafruit GFX Library`。
+>
+> **如果使用 Waveshare RLCD-4.2**，RLCD 屏的驱动代码内置于 `display.h`，无需额外安装 Arduino 库。但编译仍需要 `Adafruit GFX Library`（6×8 字体表由它提供）。
+
+### 4.5 安装 esptool（烧录工具）
+
+```powershell
+uv pip install esptool
+esptool.py version   # 确认显示版本号
+```
+
+### 4.6 安装 MinGW（用于主机端 C 代码验证）
+
+Windows 下编译 C 代码需要 GCC。推荐三种方案：
+
+**方案 A（推荐）：安装 MinGW-w64**
+- 到 https://github.com/niXman/mingw-builds-binaries/releases
+- 下载 `x86_64-13.2.0-release-win32-seh-msvcrt-rt_v11-rev0.7z`
+- 解压到 `D:\mingw64`
+- 把 `D:\mingw64\bin` 加入系统 PATH
+- 终端验证：`gcc --version`
+
+**方案 B：用 Git Bash（自带 GCC）**
+- 安装 Git for Windows，打开 Git Bash，里面自带 gcc
+
+**方案 C：用 WSL**
+```powershell
+wsl --install
+# 然后
+sudo apt install gcc
+```
+
+---
+
+## 5. 项目依赖安装
+
+```powershell
+cd D:\codes\esp32-ai    # 进入你的项目目录
+
+# 安装 Python 依赖
+uv sync
+# 或手动安装：
+uv pip install torch numpy requests tokenizers tqdm
+```
+
+---
+
+## 6. 数据准备
+
+```powershell
+cd D:\codes\esp32-ai
+uv run python data/prepare.py --vocab 32768
+```
+
+这一步会：
+1. 从 HuggingFace 下载 TinyStories 数据集前 300MB
+2. 训练 BPE tokenizer（词汇量 32768）
+3. 生成 `data/train_v32768.bin` + `data/val_v32768.bin`
+
+**耗时约 2-5 分钟**（取决于网速）。
+
+---
+
+## 7. 训练模型（可选）
+
+> **新手强烈建议跳过这一步**。训练需要 GPU（NVIDIA 显卡），纯 CPU 训练会非常慢（数天）。
+>
+> 你可以直接下载预训练好的模型文件，跳到步骤 8。
+
+如果你有 NVIDIA GPU（8GB+ VRAM）：
+
+```powershell
+# 训练 PLE 模型（28.9M 参数，推荐）
+uv run python src/train.py --arm ple --vocab 32768 --d-model 96 --n-layers 6 `
+  --ple-dim 128 --target-core 560000 --batch-size 16 --seq-len 256 `
+  --steps 5000 --seed 42 --tag cleandeploy
+
+# 训练基线模型（3.7M 参数，用于对比）
+uv run python src/train.py --arm baseline --vocab 32768 --d-model 96 --n-layers 6 `
+  --ple-dim 128 --target-core 560000 --batch-size 16 --seq-len 256 `
+  --steps 5000 --seed 42 --tag cleandeploy
+```
+
+训练完成后，会在 `runs/` 目录下生成 `.pt` 和 `.json` 文件。
+
+---
+
+## 8. 量化与导出
+
+**必须做这一步**，不量化模型太大放不进 Flash。
+
+```powershell
+cd D:\codes\esp32-ai
+
+# 量化到 4-bit PTQ（Post-Training Quantization）
+uv run python src/quantize.py --tag cleandeploy --seed 42
+
+# 导出为嵌入式 .bin 格式（默认加载 ple-cleandeploy-s42.pt）
+uv run python src/export.py ple-cleandeploy-s42
+```
+
+导出的文件：
+
+| 文件 | 大小 | 说明 |
+|---|---|---|
+| `firmware/model/model.bin` | ~14.9MB | 模型权重 + 头部配置 |
+| `firmware/model/golden.npz` | ~130KB | 用于 C 验证的参考输出 |
+| `firmware/model/golden.txt` | ~1.5MB | golden.txt 的文本版本 |
+
+---
+
+## 9. 生成 vocab.h
+
+> ⚠️ **极其重要！这一步是固件 README 漏掉的步骤**。`.ino` 文件包含了 `#include "vocab.h"`，但这个文件不在仓库中——必须通过以下命令生成。
+
+```powershell
+uv run python src/gen_assets.py
+```
+
+这会生成 `firmware/esp32_llm/vocab.h`，包含词汇解码表（VOCAB_N / VOCAB_BLOB / VOCAB_OFF）。
+
+同时终端会打印出 "Once upon a time" 的 token IDs，用于填入 `.ino` 文件的 `PROMPT_IDS`。如果打印的 ID 与固件默认的不同，请更新 `.ino` 中第 22 行的 `PROMPT_IDS` 数组。
+
+---
+
+## 10. 主机端验证
+
+在烧录到 ESP32 之前，先在电脑上验证 C 实现和 PyTorch 计算结果一致：
+
+```powershell
+# 方案1：用 Git Bash（推荐 Windows 用户）
+# 打开 Git Bash，执行：
+cd /d/codes/esp32-ai
+gcc -O3 -o /tmp/esp32-llm-verify firmware/host_verify/verify.c -lm
+/tmp/esp32-llm-verify firmware/model/model.bin firmware/model/golden.txt
+
+# 方案2：用 PowerShell + MinGW
+gcc -O3 -o $env:TEMP\esp32-llm-verify.exe firmware/host_verify/verify.c -lm
+& $env:TEMP\esp32-llm-verify.exe firmware/model/model.bin firmware/model/golden.txt
+```
+
+验证通过应输出：
+```
+max abs diff across all 32768 logits: 0.00001
+PASS
+```
+
+这意味着 C 语言的推理结果与 PyTorch 完全一致（误差 1e-5）。
+
+---
+
+## 11. 编译固件
+
+```powershell
+cd D:\codes\esp32-ai
+
+arduino-cli compile `
+  --fqbn 'esp32:esp32:esp32s3:UploadSpeed=921600,USBMode=hwcdc,CDCOnBoot=cdc,UploadMode=default,CPUFreq=240,FlashMode=qio,FlashSize=16M,PartitionScheme=custom,PSRAM=opi,DebugLevel=info' `
+  --build-property compiler.optimization_flags=-O3 `
+  --build-path D:\esp32-build `
+  firmware\esp32_llm
+```
+
+如果报错 `esp_partition.h: No such file or directory` → ESP32 核心安装不完整：
+```powershell
+arduino-cli core update-index
+arduino-cli core install esp32:esp32
+```
+
+---
+
+## 12. 烧录到 ESP32-S3
+
+### 12.1 找到 COM 口
+
+1. 把 ESP32-S3 用 USB 线连接到电脑
+2. 打开 **设备管理器** → 展开 **端口（COM 和 LPT）**
+3. 应看到 `USB Serial Device (COM3)` 或 `ESP32-S3 (COM4)`
+4. 记下这个 COM 端口号（下面假设是 COM3）
+
+> **如果设备管理器没有显示**：换一根能传数据的数据线。ESP32-S3 内置 USB CDC，Windows 10/11 自动识别，无需额外驱动。
+
+### 12.2 烧录固件
+
+```powershell
+arduino-cli upload `
+  -p COM3 `
+  --fqbn 'esp32:esp32:esp32s3:UploadSpeed=921600,USBMode=hwcdc,CDCOnBoot=cdc,UploadMode=default,CPUFreq=240,FlashMode=qio,FlashSize=16M,PartitionScheme=custom,PSRAM=opi,DebugLevel=info' `
+  --input-dir D:\esp32-build `
+  firmware\esp32_llm
+```
+
+### 12.3 烧录模型数据
+
+```powershell
+esptool.py --chip esp32s3 --port COM3 --baud 921600 write_flash 0x110000 firmware\model\model.bin
+```
+
+**写入约 15MB 数据，需 2-5 分钟**。不要中断烧录过程。
+
+---
+
+## 13. 运行与调试
+
+### 13.1 启动串口监视器
+
+```powershell
+arduino-cli monitor -p COM3 --config baudrate=115200
+```
+
+### 13.2 复位 ESP32
+
+按 ESP32 上的 **复位按钮（EN/RST）**，应看到：
+
+```
+=== ESP32-S3 PLE TinyLM ===
+model: V=32768 D=96 L=6 H=4 F=66 P=128  (mapped 15.6 MB)
+head staged int8: 2.53 MB
+PSRAM free after alloc: ~5100 KB
+
+>>> Once upon a time,
+```
+
+### 13.3 正常输出
+
+然后逐词生成一个约 200 token 的小故事。生成完成后显示性能数据：
+
+```
+--- 200 tokens in 20.50 s ---
+throughput: 9.76 tok/s   (102.9 ms/token)
+profile ms/token: input 4.4 | attn 25.6 | ffn 6.9 | ple 8.5 | head 57.6
+```
+
+### 13.4 常见启动问题
+
+| 启动信息 | 含义 | 处理方法 |
+|---|---|---|
+| `model partition not found` | 模型分区未烧录或烧录失败 | 重新执行 `esptool.py write_flash` |
+| `bad model magic` | model.bin 文件损坏 | 重新执行 `export.py` |
+| 串口完全无输出 | 波特率不匹配或端口错误 | 确认 `--baudrate 115200` 和端口号 |
+| 持续重启循环 | 看门狗超时或供电不足 | 换 USB 口或加外部电源 |
+
+---
+
+## 14. 接线图与屏幕设置
+
+### 14.1 OLED 屏幕配置
+
+项目默认使用 I2C OLED 屏幕（`DISPLAY_KIND` 为 `DISPLAY_OLED_I2C`）。
+
+**引脚定义**（在 `firmware/esp32_llm/display.h` 中）：
+```cpp
+#define OLED_SDA 18     // 数据线
+#define OLED_SCL 46     // 时钟线
+#define OLED_ADDR 0x3C   // I2C 地址（部分屏幕为 0x3D）
+```
+
+**屏幕控制器设置**：
+- 1.3寸屏幕通常是 SH1106 芯片（代码默认值）
+- 0.96寸屏幕通常是 SSD1306 芯片
+
+如果显示错乱，打开 `display.h` 修改第 31-33 行：
+```cpp
+// 原配置（1.3寸 SH1106）：
+#define OLED_CONTROLLER OLED_SH1106
+
+// 改为（0.96寸 SSD1306）：
+#undef OLED_CONTROLLER
+#define OLED_CONTROLLER OLED_SSD1306
+```
+
+### 14.2 TFT 彩屏配置
+
+如果用 2寸 ST7789 SPI 彩屏，修改 `display.h`：
+```cpp
+#undef DISPLAY_KIND
+#define DISPLAY_KIND DISPLAY_TFT_SPI
+```
+
+### 14.3 Waveshare RLCD-4.2 配置
+
+**⚠️ 这块板子的引脚分配与通用 ESP32-S3 完全不同，不能复用 14.1/14.2 节的接线图和配置。**
+
+**第一步：选择显示屏模式**
+
+在 `display.h` 中将 `DISPLAY_KIND` 设为 `DISPLAY_RLCD_ST7305`：
+
+```cpp
+// display.h（约第 19 行附近）
+#undef DISPLAY_KIND
+#define DISPLAY_KIND DISPLAY_RLCD_ST7305  // 使用 RLCD-4.2 驱动
+```
+
+**第二步：确认 SPI 引脚映射**
+
+display.h 中 RLCD 分支已内置正确的 Waveshare 引脚定义。这些引脚是板上固定的，不能更改：
+
+```cpp
+// display.h 自动使用 Waveshare 官方引脚映射：
+// CS   = GPIO40  （注意：不是通用板的 GPIO10）
+// DC   = GPIO5   （不是通用板的 GPIO7）
+// RST  = GPIO41  （不是通用板的 GPIO6）
+// SCK  = GPIO11  （不是通用板的 GPIO12）
+// MOSI = GPIO12  （不是通用板的 GPIO11）
+```
+
+**第三步：编译与烧录**
+
+FQBN 参数**与通用板完全一致**，因为都是 ESP32-S3 N16R8 + Octal PSRAM：
+
+```powershell
+arduino-cli compile `
+  --fqbn 'esp32:esp32:esp32s3:UploadSpeed=921600,USBMode=hwcdc,CDCOnBoot=cdc,UploadMode=default,CPUFreq=240,FlashMode=qio,FlashSize=16M,PartitionScheme=custom,PSRAM=opi,DebugLevel=info' `
+  --build-property compiler.optimization_flags=-O3 `
+  --build-path D:\esp32-build `
+  firmware\esp32_llm
+```
+
+烧录固件和模型数据的命令与通用板**完全一样**（参考第 12 节），只需把 `COM` 口换成 RLCD-4.2 枚举的端口即可。
+
+**第四步：RLCD 刷新注意事项**
+
+- RLCD 是全反射式单色屏（黑白两阶），**无背光**，靠环境光反射成像。在光线不足的环境下显示可能难以辨认。
+- SPI 速率为 1MHz，ST7305 对时序不敏感，提高频率不会带来实际改善。
+- 全屏刷新约需 15KB 帧缓冲写入，每次 `display_puts()` 后自动刷新全屏。如果生成速度约 9.5 tok/s，屏幕刷新速度完全可以跟上。
+- 如果需要优化屏幕闪烁，可以考虑增加脏矩形刷新（高级用法，当前固件未实现）。
+
+### 14.4 display.h RLCD 驱动代码清单
+
+如果你使用的是 Waveshare RLCD-4.2 开发板，需要为 `display.h` 添加 ST7305 驱动。以下是完整的 `DISPLAY_RLCD_ST7305` 分支代码，直接追加到 `display.h` 末尾（在最后一行 `#endif` 之前）即可：
+
+```cpp
+// =============== 4.2" RLCD SPI (Waveshare ST7305) ===========================
+// Wiring is fixed on the Waveshare ESP32-S3-RLCD-4.2 PCB (no user wiring needed):
+//   CS=GPIO40, DC=GPIO5, RST=GPIO41, SCK=GPIO11, MOSI=GPIO12
+// The ST7305 is 1-bit monochrome, 400x300, write-only SPI (no MISO pin).
+//
+// Frame buffer: 400*300/8 = 15 KB, stored in BSS (not PSRAM) because 400x300
+// is small enough for SRAM. The flush call writes the full buffer over SPI
+// every time display_puts() is called (~9.5 times/second during generation).
+#if DISPLAY_KIND == DISPLAY_RLCD_ST7305
+#include <Adafruit_GFX.h>
+#include <SPI.h>
+
+#define RLCD_CS   40
+#define RLCD_DC   5
+#define RLCD_RST  41
+#define RLCD_SCK  11
+#define RLCD_MOSI 12
+#define SCR_W     400
+#define SCR_H     300
+#define CW        6
+#define CH        8
+
+// ST7305 command set (partial)
+#define ST7305_SLPIN   0xAE
+#define ST7305_SLPOUT  0xAF
+#define ST7305_DISPON  0xAF
+#define ST7305_DISPOFF 0xAE
+#define ST7305_COLMOD  0x20
+#define ST7305_CASET   0x2A  // column address range
+#define ST7305_RASET   0x2B  // row address range
+#define ST7305_RAMWR   0x2C
+
+static uint8_t framebuf[(SCR_W * SCR_H) / 8];  // 15 KB in BSS
+static int ox = 0, oy = 0;
+
+static inline void rlcd_write_cmd(uint8_t cmd) {
+  digitalWrite(RLCD_DC, LOW);
+  SPI.transfer(cmd);
+}
+
+static inline void rlcd_write_data(uint8_t data) {
+  digitalWrite(RLCD_DC, HIGH);
+  SPI.transfer(data);
+}
+
+static void rlcd_set_window(int x0, int y0, int x1, int y1) {
+  rlcd_write_cmd(ST7305_CASET);
+  rlcd_write_data(x0 >> 8); rlcd_write_data(x0 & 0xFF);
+  rlcd_write_data(x1 >> 8); rlcd_write_data(x1 & 0xFF);
+  rlcd_write_cmd(ST7305_RASET);
+  rlcd_write_data(y0 >> 8); rlcd_write_data(y0 & 0xFF);
+  rlcd_write_data(y1 >> 8); rlcd_write_data(y1 & 0xFF);
+  rlcd_write_cmd(ST7305_RAMWR);
+}
+
+static void display_home() {
+  memset(framebuf, 0, sizeof(framebuf));
+  ox = 0; oy = 0;
+}
+
+static void display_flush() {
+  digitalWrite(RLCD_CS, LOW);
+  rlcd_set_window(0, 0, SCR_W - 1, SCR_H - 1);
+  for (int i = 0; i < (int)sizeof(framebuf); i++)
+    rlcd_write_data(framebuf[i]);
+  digitalWrite(RLCD_CS, HIGH);
+}
+
+static void display_begin() {
+  pinMode(RLCD_CS, OUTPUT); digitalWrite(RLCD_CS, HIGH);
+  pinMode(RLCD_DC, OUTPUT);
+  pinMode(RLCD_RST, OUTPUT);
+  SPI.begin(RLCD_SCK, -1, RLCD_MOSI, RLCD_CS);
+  SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
+
+  // Hardware reset sequence
+  digitalWrite(RLCD_RST, LOW); delay(10);
+  digitalWrite(RLCD_RST, HIGH); delay(10);
+
+  digitalWrite(RLCD_CS, LOW);
+  rlcd_write_cmd(ST7305_SLPOUT);  // sleep out
+  delay(120);
+  rlcd_write_cmd(0x21);           // RC + OSC configuration
+  rlcd_write_cmd(0x04);           // VCOM setting
+  rlcd_write_cmd(0x03);           // VDV setting
+  rlcd_write_cmd(0x38);           // booster
+  rlcd_write_cmd(ST7305_COLMOD);  // 1-bit pixel
+  delay(100);
+  rlcd_write_cmd(ST7305_DISPON);  // display on
+  digitalWrite(RLCD_CS, HIGH);
+
+  display_home();
+  display_flush();
+}
+
+static void display_puts(const unsigned char *s, int len) {
+  if (ox + len * CW > SCR_W) { oy += CH; ox = 0; }
+  if (oy + CH > SCR_H) display_home();
+  for (int i = 0; i < len; i++) {
+    char c = (char)s[i];
+    if (c == '\n') { oy += CH; ox = 0; }
+    else if (c >= 32 && c < 127) {
+      if (ox + CW > SCR_W) { oy += CH; ox = 0; }
+      if (oy + CH > SCR_H) display_home();
+      // Render 6x8 glyph into the framebuffer bit by bit
+      for (int row = 0; row < CH; row++) {
+        uint8_t bits = pgm_read_byte(&font6x8[(c - 32) * CH + row]);
+        for (int col = 0; col < CW; col++) {
+          if (bits & (0x80 >> col)) {
+            int px = ox + col, py = oy + row;
+            framebuf[(py * SCR_W + px) / 8] |= 0x80 >> (px & 7);
+          } else {
+            int px = ox + col, py = oy + row;
+            framebuf[(py * SCR_W + px) / 8] &= ~(0x80 >> (px & 7));
+          }
+        }
+      }
+      ox += CW;
+    }
+    if (oy + CH > SCR_H) display_home();
+  }
+  display_flush();
+}
+
+static void display_stats(float tok_s, float ms) {
+  display_home();
+  char buf[64];
+  snprintf(buf, sizeof(buf), "ESP32-S3  PLE LLM\n");
+  display_puts((const unsigned char *)buf, strlen(buf));
+  snprintf(buf, sizeof(buf), "28.9M params\n");
+  display_puts((const unsigned char *)buf, strlen(buf));
+  snprintf(buf, sizeof(buf), "in 320KB of RAM\n\n");
+  display_puts((const unsigned char *)buf, strlen(buf));
+  snprintf(buf, sizeof(buf), "%.1f tok/s  %.0f ms/tok\n", tok_s, ms);
+  display_puts((const unsigned char *)buf, strlen(buf));
+}
+#endif  // DISPLAY_RLCD_ST7305
+```
+
+> ⚠️ **重要提示**：上述 ST7305 初始化命令序列基于该驱动 IC 数据手册的典型配置编写。
+> 如果首次上电后屏幕只显示白屏或全黑，尝试将 `SPISettings(1000000, ...)` 中的速率降低到 `500000`（500KHz），或对照 Waveshare 提供的官方 Arduino 示例调整初始化命令。
+>
+> 社区已有 ESPHome 的 ST7305 驱动可参考：`kylehase/ESPHome-ST7305-RLCD`（GitHub），用于验证命令序列的正确性。
+
+### 14.5 纯串口模式（不接屏幕）
+
+这是最快的启动方式。修改 `esp32_llm.ino` 第 17 行：
+```cpp
+#define USE_DISPLAY 0   // 改为 0 禁用屏幕
+```
+
+这样编译不需要任何屏幕库，只需 `Adafruit GFX Library`。
+
+---
+
+## 15. 性能指标
+
+### 15.1 片上推理速度
+
+| 实现 | token/秒 | 模型步时间 |
+|---|---|---|
+| 首次正确移植 | 0.57 tok/s | 1,757.2 ms |
+| PSRAM 头 + 标量清理 | 4.61-4.77 tok/s | 193.9 ms |
+| 精确 dot/RoPE/attention 清理 | — | 172.9 ms |
+| 双核精确头 | 5.67-6.22 tok/s | 139.4 ms |
+| **int8-staged 头 + int8 激活** | **~9.5 tok/s** | **102.9 ms** |
+
+### 15.2 各阶段耗时分布（int8 头版本）
+
+| 阶段 | ms/token |
+|---|---|
+| 输出头（双核） | 57.6 |
+| Attention | 25.6 |
+| PLE 路径 | 8.5 |
+| FFN | 6.9 |
+| 输入处理 | 4.4 |
+
+### 15.3 内存使用
+
+| 区域 | 用途 | 大小 |
+|---|---|---|
+| 内部 SRAM | 密集核心（XIP 闪存映射） | ~273KB |
+| PSRAM | int8-staged 头 + KV cache + 暂存 | ~2.9MB |
+| 可用 PSRAM | 剩余空间 | ~5100KB |
+| 闪存 | PLE 表 (25M 参数) | ~12MB |
+
+---
+
+## 16. 完整故障排查表
+
+### 16.1 工具链问题
+
+| 症状 | 最大可能原因 | 解决方案 |
+|---|---|---|
+| `python` 命令找不到 | Python 未加入 PATH | 重新安装 Python，勾选 "Add to PATH" |
+| `arduino-cli` 命令找不到 | 未加入 PATH | 手动把 arduino-cli 目录加入系统 PATH |
+| `esptool.py` 命令找不到 | esptool 未安装 | `uv pip install esptool` |
+| `gcc` 命令找不到 | MinGW 未安装或未加入 PATH | 安装 MinGW-w64 并加入 PATH |
+| `uv` 命令找不到 | uv 未安装 | 重新执行 uv 安装命令 |
+
+### 16.2 ESP32 支持问题
+
+| 症状 | 解决方案 |
+|---|---|
+| `arduino-cli core install` 极慢 | 换手机热点；或设置代理：`$env:HTTP_PROXY="http://..."` |
+| 编译时报 `esp_partition.h: No such file or directory` | `arduino-cli core update-index && arduino-cli core install esp32:esp32` |
+| 编译时缺其他头文件 | 可能是 ESP32 核心版本不匹配，确认使用 3.3.10 版本 |
+
+### 16.3 编译问题
+
+| 症状 | 最大可能原因 | 解决方案 |
+|---|---|---|
+| 编译失败 `vocab.h: No such file` | 忘了跑 gen_assets.py！ | `uv run python src/gen_assets.py` |
+| 编译失败缺库头文件 | 少装了某个 Arduino 库 | `arduino-cli lib install "库名"` |
+| 编译速度极慢 | 首次编译要编译 ESP32 核心 | 正常，后续增量编译会快很多 |
+| `-O3` 优化选项报错 | arduino-cli 版本不支持该语法 | 去掉 `--build-property` 参数重试 |
+
+### 16.4 烧录问题
+
+| 症状 | 解决方案 |
+|---|---|
+| 端口找不到 | 换数据线；检查设备管理器；装 CP210x/CH340 驱动（ESP32-S3 通常不需要） |
+| 烧录到一半卡住 | 降低波特率：把 `921600` 改成 `115200` |
+| `A fatal error occurred: Connection timed out` | 按住 ESP32 的 **BOOT/IO0** 按钮再试 |
+| 烧录成功但无输出 | 检查 `--baud` 参数是否与 `monitor` 一致 |
+| 模型烧录 30 秒就完成 | model.bin 文件损坏或为空，重新导出 |
+
+### 16.5 运行问题
+
+| 症状 | 解决方案 |
+|---|---|
+| `model partition not found` | 模型数据没烧录成功，重新 `esptool.py write_flash` |
+| `bad model magic` | model.bin 损坏，重新 `export.py` |
+| 串口输出乱码 | 检查波特率设置是否是 `115200` |
+| 故事全是重复词 "the the the" | 模型没训练好或加载错误 |
+| 跑几秒后自动重启 | 代码内置 `delay(0)` 缓解；减少生成步数 |
+| 屏幕一行正确其余噪声 | SH1106 被当成 SSD1306 使用了 |
+| 屏幕完全不显示但程序在跑 | 检查接线或 I2C 地址（0x3C vs 0x3D） |
+| RLCD 白屏或全黑 | ST7305 初始化命令不匹配，尝试降 SPI 速到 500KHz |
+| RLCD 在亮环境下显示很淡 | RLCD 无背光，需环境光反射；调整视角或增加环境光 |
+| RLCD 屏幕闪烁严重 | 每次 `display_puts` 全屏刷新导致；考虑改为脏矩形刷新的高级方案 |
+| 屏幕显示极慢 | I2C 频率默认 400kHz，可尝试提高或换 SPI 屏幕 |
+
+### 16.6 生成质量问题
+
+| 症状 | 可能原因 |
+|---|---|
+| 故事逻辑不通顺 | 28.9M 参数模型能力有限，这是正常现象 |
+| 输出是空白 | tokenizer 不匹配，重新 `gen_assets.py` |
+| 中文显示为乱码 | 模型只训练在英文 TinyStories 上，不支持中文 |
+| 生成速度明显慢于 9 tok/s | 可能是供电不足导致降频 |
+
+---
+
+## 17. 执行检查清单
+
+```
+□ 买对了 ESP32-S3 N16R8（不是 N8R2！）
+□ 数据线能传输数据（不是纯充电线）
+
+□ 安装了 Python 3.12+
+□ 安装了 uv
+□ 安装了 arduino-cli
+□ 安装了 ESP32 开发板支持（arduino-cli core install esp32:esp32）
+□ 安装了必要的 Arduino 库
+□ 安装了 esptool
+□ 安装了 MinGW-w64 或 Git Bash
+
+□ uv sync 成功安装了 Python 依赖
+□ 数据准备完成（data/prepare.py --vocab 32768）
+□ 模型量化完成（quantize.py）
+□ .bin 文件导出成功（export.py）
+□ vocab.h 已生成（gen_assets.py）
+
+□ 主机端 C 验证通过（verify.c 输出 PASS）
+□ 固件编译无错误
+□ ESP32 被识别为 COM 端口
+□ 固件烧录成功
+□ 模型数据烧录成功（约 15MB）
+□ 复位 ESP32 后看到故事输出！
+```
+
+---
+
+## 18. 命令速查表
+
+### 数据与模型
+
+| 操作 | 命令 |
+|---|---|
+| 准备数据 | `uv run python data/prepare.py --vocab 32768` |
+| 训练 PLE 模型 | `uv run python src/train.py --arm ple ...` |
+| 量化检查 | `uv run python src/quantize.py --tag cleandeploy` |
+| 导出 .bin | `uv run python src/export.py ple-cleandeploy-s0` |
+| 生成 vocab.h | `uv run python src/gen_assets.py` |
+| 抽样测试 | `uv run python src/sample.py --run runs/xxx.pt` |
+| 参数预算报告 | `uv run python src/budget.py` |
+
+### 验证
+
+| 操作 | 命令 |
+|---|---|
+| 主机端 C 验证 | `gcc -O3 -o /tmp/verify firmware/host_verify/verify.c -lm && /tmp/verify firmware/model/model.bin firmware/model/golden.txt` |
+
+### 编译与烧录
+
+| 操作 | 命令 |
+|---|---|
+| 编译固件 | `arduino-cli compile --fqbn '...' --build-property compiler.optimization_flags=-O3 --build-path D:\esp32-build firmware\esp32_llm` |
+| 烧录固件 | `arduino-cli upload -p COM3 --fqbn '...' --input-dir D:\esp32-build` |
+| 烧录模型 | `esptool.py --chip esp32s3 --port COM3 --baud 921600 write_flash 0x110000 firmware\model\model.bin` |
+| 串口监视 | `arduino-cli monitor -p COM3 --config baudrate=115200` |
+
+---
+
+> 这个教程对应的是 [esp32-ai](https://github.com/slvdev/esp32-ai) 项目，原始设计来自 slvDev。
+>
+> 如果你遇到任何教程中没有覆盖的问题，或者某一步无法继续，请告诉我具体现象（串口输出、错误信息等），我会帮你排查。
