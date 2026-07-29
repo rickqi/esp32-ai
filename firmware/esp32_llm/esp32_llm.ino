@@ -19,8 +19,15 @@
 #include "display.h"
 #endif
 
-static const int PROMPT_IDS[] = {433, 447, 259, 405}; // "Once upon a time"
-static const int N_GENERATE = 200;
+// ---- serial prompt input buffer (replaces hardcoded PROMPT_IDS) ---------------
+#define MAX_PROMPT_IDS 512
+#define LINE_BUF_SIZE 4096
+
+static int recv_ids[MAX_PROMPT_IDS];  // received token IDs
+static int recv_n = 0;                // number of valid IDs in recv_ids
+static int recv_max = 200;            // tokens to generate (from "max" field)
+static char line_buf[LINE_BUF_SIZE];  // line accumulation buffer
+static int line_pos = 0;              // current position in line_buf
 
 // Emit one token to every active output (serial always; TFT when enabled).
 static void emit(int tok) {
@@ -122,6 +129,85 @@ static void blink(uint8_t g) {
 #endif
 }
 
+// ---- serial prompt JSON parser ------------------------------------------------
+// Parse a JSON line of the form:  {"ids": [433, 447, 259, 405], "max": 200}
+// Fills ids[] and sets *n to the count, *max to the requested generation length.
+// Returns 0 on success, -1 on parse failure.
+static int parse_json_prompt(const char *json, int *ids, int *n, int *max) {
+  *n = 0;
+  *max = model.c.seq_len;                          // default: generate to context limit
+  const char *p = strstr(json, "\"ids\":[");
+  if (!p) return -1;
+  p += 7;                                          // skip past "ids":[
+  while (*p && *p != ']' && *n < MAX_PROMPT_IDS) {
+    if (*p == ' ' || *p == ',') { p++; continue; }
+    ids[(*n)++] = atoi(p);
+    while (*p && *p != ',' && *p != ']') p++;
+  }
+  if (*n == 0) return -1;
+  p = strstr(json, "\"max\":");
+  if (p) {
+    p += 6;                                        // skip past "max":
+    while (*p == ' ') p++;
+    int m = atoi(p);
+    if (m > 0 && m <= model.c.seq_len) *max = m;
+  }
+  return 0;
+}
+
+// ---- prompt-driven generation ------------------------------------------------
+// Run the full generate loop using the last received prompt (recv_ids/recv_n).
+// Writes tokens to serial (raw text) and display, then emits a JSON done signal.
+static void run_generation() {
+  int pos = 0, tok = 0;
+  int64_t decode_us = 0;
+  int decoded = 0;
+
+  for (int i = 0; i < recv_n; i++) {               // prime with the prompt
+    tok = recv_ids[i];
+    emit(tok);
+    llm_forward(&model, tok, pos++, &s);
+  }
+
+  llm_profile_reset(&s);
+  int64_t t_start = esp_timer_get_time();
+
+  for (int step = 0; step < recv_max && pos < model.c.seq_len; step++) {
+    // greedy: argmax over the trained vocab
+    int best = 0; float bv = -1e30f;
+    for (int v = 0; v < VOCAB_N; v++)
+      if (s.logits[v] > bv) { bv = s.logits[v]; best = v; }
+    tok = best;
+    emit(tok);
+    blink((step & 1) ? 40 : 8);
+
+    int64_t d0 = esp_timer_get_time();
+    llm_forward(&model, tok, pos++, &s);
+    decode_us += esp_timer_get_time() - d0;
+    decoded++;
+    if ((step & 7) == 0) delay(0);                  // feed the task WDT
+  }
+  int64_t total_us = esp_timer_get_time() - t_start;
+
+  Serial.printf("\n\n--- %d tokens in %.2f s ---\n", decoded, total_us / 1e6);
+  Serial.printf("throughput: %.2f tok/s   (%.1f ms/token)\n",
+                decoded * 1e6 / total_us, decode_us / 1000.0 / decoded);
+  if (s.profile.calls) {
+    float n = (float)s.profile.calls * 1000.f;
+    Serial.printf("profile ms/token: input %.1f | attn %.1f | ffn %.1f | ple %.1f | head %.1f\n",
+                  s.profile.input_us / n, s.profile.attn_us / n,
+                  s.profile.ffn_us / n, s.profile.ple_us / n,
+                  s.profile.head_us / n);
+  }
+#if USE_DISPLAY
+  display_stats(decoded * 1e6f / decode_us, decode_us / 1000.0f / decoded);
+#endif
+
+  // JSON completion marker: the PC script recognises this as end-of-stream.
+  Serial.printf("{\"done\":true,\"tok/s\":%.2f}\n", decoded * 1e6f / total_us);
+  blink(0);
+}
+
 void setup() {
   Serial.begin(115200);
   delay(1500);
@@ -177,55 +263,24 @@ void setup() {
   Serial.printf("PSRAM free after alloc: %u KB\n\n",
                 heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024);
 
-  // ---- generate ----
-  Serial.print(">>> ");
-  int n_prompt = sizeof(PROMPT_IDS) / sizeof(int);
-  int pos = 0, tok = 0;
-  int64_t t_start = 0;
-  int64_t decode_us = 0;
-  int decoded = 0;
-
-  for (int i = 0; i < n_prompt; i++) {  // prime with the prompt
-    tok = PROMPT_IDS[i];
-    emit(tok);
-    llm_forward(&model, tok, pos++, &s);
-  }
-
-  llm_profile_reset(&s);
-
-  t_start = esp_timer_get_time();
-  for (int step = 0; step < N_GENERATE && pos < model.c.seq_len; step++) {
-    // greedy: argmax over the trained vocab
-    int best = 0; float bv = -1e30f;
-    for (int v = 0; v < VOCAB_N; v++)
-      if (s.logits[v] > bv) { bv = s.logits[v]; best = v; }
-    tok = best;
-    emit(tok);
-    blink((step & 1) ? 40 : 8);
-
-    int64_t d0 = esp_timer_get_time();
-    llm_forward(&model, tok, pos++, &s);
-    decode_us += esp_timer_get_time() - d0;
-    decoded++;
-    if ((step & 7) == 0) delay(0);  // feed the task WDT ~every 8 tokens (~1.1s), near-free
-  }
-  int64_t total_us = esp_timer_get_time() - t_start;
-
-  Serial.printf("\n\n--- %d tokens in %.2f s ---\n", decoded, total_us / 1e6);
-  Serial.printf("throughput: %.2f tok/s   (%.1f ms/token)\n",
-                decoded * 1e6 / total_us, decode_us / 1000.0 / decoded);
-  if (s.profile.calls) {
-    float n = (float)s.profile.calls * 1000.f;
-    Serial.printf("profile ms/token: input %.1f | attn %.1f | ffn %.1f | ple %.1f | head %.1f\n",
-                  s.profile.input_us / n, s.profile.attn_us / n,
-                  s.profile.ffn_us / n, s.profile.ple_us / n,
-                  s.profile.head_us / n);
-  }
-#if USE_DISPLAY
-  // Closing card: compute-only tok/s (the model's own speed) + ms/token.
-  display_stats(decoded * 1e6f / decode_us, decode_us / 1000.0f / decoded);
-#endif
-  blink(0);
+  // ---- ready for serial prompt input ----
+  Serial.println("{\"ready\":true}");
 }
 
-void loop() { delay(10000); }
+void loop() {
+  // Accumulate one line from Serial, then parse and run generation.
+  while (Serial.available() && line_pos < LINE_BUF_SIZE - 1) {
+    char c = (char)Serial.read();
+    if (c == '\n') {
+      line_buf[line_pos] = '\0';                     // null-terminate
+      line_pos = 0;
+      if (line_buf[0] == '{' && parse_json_prompt(line_buf, recv_ids, &recv_n, &recv_max) == 0) {
+        run_generation();
+        Serial.println("{\"ready\":true}");           // signal ready for next prompt
+      }
+      break;
+    }
+    if (c != '\r') line_buf[line_pos++] = c;          // strip CR, keep everything else
+  }
+  delay(1);                                            // yield to idle task
+}
