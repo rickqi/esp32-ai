@@ -22,12 +22,18 @@
 // ---- serial prompt input buffer (replaces hardcoded PROMPT_IDS) ---------------
 #define MAX_PROMPT_IDS 512
 #define LINE_BUF_SIZE 4096
+// Timeout before running the default demo prompt when no serial input arrives.
+// Set to 0 to wait forever (serial-only mode).
+#define PROMPT_TIMEOUT_MS 10000
 
 static int recv_ids[MAX_PROMPT_IDS];  // received token IDs
 static int recv_n = 0;                // number of valid IDs in recv_ids
 static int recv_max = 200;            // tokens to generate (from "max" field)
 static char line_buf[LINE_BUF_SIZE];  // line accumulation buffer
 static int line_pos = 0;              // current position in line_buf
+// Default demo prompt used when PROMPT_TIMEOUT_MS expires.
+static const int DEMO_PROMPT_IDS[] = {433, 447, 259, 405};  // "Once upon a time"
+static const int DEMO_N_GENERATE = 200;
 
 // Emit one token to every active output (serial always; TFT when enabled).
 static void emit(int tok) {
@@ -268,6 +274,23 @@ void setup() {
 }
 
 void loop() {
+#if PROMPT_TIMEOUT_MS > 0
+  // Fallback: if no prompt arrives within the timeout, use the default demo.
+  static unsigned long boot_ms = 0;
+  if (!boot_ms) boot_ms = millis();
+  if (!recv_n && line_pos == 0 && (millis() - boot_ms > PROMPT_TIMEOUT_MS)) {
+    Serial.print("\n[timeout] using demo prompt");
+    memcpy(recv_ids, DEMO_PROMPT_IDS, sizeof(DEMO_PROMPT_IDS));
+    recv_n = sizeof(DEMO_PROMPT_IDS) / sizeof(int);
+    recv_max = DEMO_N_GENERATE;
+    run_generation();
+    boot_ms = millis();   // reset timer for next cycle
+    recv_n = 0;           // go back to waiting after generation
+    line_pos = 0;
+    Serial.println("{\"ready\":true}");
+  }
+#endif
+
   // Accumulate one line from Serial, then parse and run generation.
   while (Serial.available() && line_pos < LINE_BUF_SIZE - 1) {
     char c = (char)Serial.read();
