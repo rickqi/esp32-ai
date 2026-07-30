@@ -9,6 +9,11 @@
 #include "esp_timer.h"
 #include <mbedtls/base64.h>
 #include <Wire.h>
+#include <WiFi.h>
+
+// ADC (battery)
+#include "driver/adc.h"
+
 #define LLM_PROFILE 1
 #define LLM_PROFILE_NOW() esp_timer_get_time()
 #include "../common/llm.h"
@@ -35,6 +40,68 @@ static int recv_n = 0;                // number of valid IDs in recv_ids
 static int recv_max = 200;            // tokens to generate (from "max" field)
 static char line_buf[LINE_BUF_SIZE];  // line accumulation buffer
 static int line_pos = 0;              // current position in line_buf
+
+// ---- WiFi STA + Battery ADC globals ----------------------------------------
+static char wifi_status[20] = "No WiFi";
+static float battery_voltage = 3.7f;
+static float shtc3_temp = 25.0f, shtc3_humi = 50.0f;
+static unsigned long last_wifi_check = 0;
+
+// Refresh WiFi status (called from run_generation / header draw).
+static void update_wifi_status() {
+  unsigned long now = millis();
+  if (now - last_wifi_check < 5000) return;  // throttle 5s
+  last_wifi_check = now;
+  if (WiFi.status() == WL_CONNECTED) {
+    IPAddress ip = WiFi.localIP();
+    snprintf(wifi_status, sizeof(wifi_status), "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
+  } else {
+    strcpy(wifi_status, "No WiFi");
+  }
+}
+
+// ---- SHTC3 temperature/humidity sensor (I2C 0x70, same bus as RTC) ---------
+static bool read_shtc3(float *t, float *h) {
+  Wire.beginTransmission(0x70);
+  Wire.write(0x35); Wire.write(0x17);  // wake-up
+  if (Wire.endTransmission() != 0) return false;
+  delay(20);
+  Wire.beginTransmission(0x70);
+  Wire.write(0x7C); Wire.write(0xA2);  // measure with clock stretch
+  if (Wire.endTransmission() != 0) return false;
+  delay(20);
+  Wire.requestFrom(0x70, 6);
+  if (Wire.available() < 6) return false;
+  uint16_t tr = (Wire.read() << 8) | Wire.read();
+  Wire.read();  // CRC (ignored for simplicity)
+  uint16_t hr = (Wire.read() << 8) | Wire.read();
+  Wire.read();  // CRC
+  *t = -45.0f + 175.0f * tr / 65535.0f;
+  *h = 100.0f * hr / 65535.0f;
+  return true;
+}
+
+// Initialize WiFi station — connects asynchronously to rickqi11.
+// Uses Arduino WiFi library (compatible with Arduino-ESP32 core).
+static void init_wifi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.begin("rickqi11", "18620907850");
+  Serial.println("WiFi: connecting to rickqi11... (async)");
+}
+
+// ---- Battery ADC (GPIO4, 3x voltage divider for 18650) --------------------
+static void init_adc() {
+  adc1_config_width(ADC_WIDTH_BIT_12);
+  adc1_config_channel_atten(ADC1_CHANNEL_3, ADC_ATTEN_DB_12);  // GPIO4
+}
+
+static float read_battery() {
+  int raw = adc1_get_raw(ADC1_CHANNEL_3);
+  float mv = (float)raw * 3300.0f / 4095.0f;   // mV @ ADC pin
+  return mv * 3.0f / 1000.0f;                   // battery voltage (3x divider)
+}
+
+// ---- serial prompt ----------------------------------------------------------
 // Default demo prompt used when PROMPT_TIMEOUT_MS expires.
 static const int DEMO_PROMPT_IDS[] = {433, 447, 259, 405};  // "Once upon a time"
 static const int DEMO_N_GENERATE = 200;
@@ -233,9 +300,12 @@ static void run_generation() {
   display_home();
 #endif
 #if USE_DISPLAY && DISPLAY_KIND == DISPLAY_RLCD_ST7305
-  // TUI: border frame + 2x header + prompt prefix
+  // TUI: border frame + header(wifi+title+battery) + prompt prefix
   display_draw_frame();
-  display_draw_header("ESP32-S3 PLE LLM");
+  update_wifi_status();               // refresh WiFi
+  battery_voltage = read_battery();   // refresh ADC
+  read_shtc3(&shtc3_temp, &shtc3_humi);  // refresh SHTC3
+  display_draw_header(wifi_status, battery_voltage, shtc3_temp, shtc3_humi);
   display_draw_hline(DIV1_Y);
   display_set_cursor(5, PRM_Y);
   display_puts((const unsigned char *)"> ", 2);
@@ -324,9 +394,10 @@ static void init_pcf85063() {
       Wire.read();  // skip weekday
       mo = (Wire.read() & 0x1F) - 1;  // tm_mon 0-11
       yy = ((Wire.read() >> 4) * 10 + (Wire.read() & 0x0F)) + 2000;
-      // Validate BCD ranges and year plausibility
+      // Validate BCD ranges and year plausibility (within 2 years of compile year)
+      int cyr = 2026; sscanf(__DATE__ + 7, "%d", &cyr);  // extract year from __DATE__
       have_rtc = (ss < 60 && mm < 60 && hh < 24 && dd > 0 && dd < 32
-                  && mo >= 0 && mo < 12 && yy >= 2026 && yy <= 2035);
+                  && mo >= 0 && mo < 12 && abs(yy - cyr) <= 2);
     }
   }
   struct tm tm = {0};
@@ -357,6 +428,9 @@ void setup() {
   delay(1500);
   Serial.println("\n=== ESP32-S3 PLE TinyLM ===");
   init_pcf85063();  // try PCF85063 RTC → settimeofday() for real date/time
+  init_adc();       // battery ADC (GPIO4, 3x divider)
+  init_wifi();      // WiFi STA (rickqi11) — async connect
+  // Read battery once; WiFi will connect in background
 
   // Map the model partition.
   const esp_partition_t *part = esp_partition_find_first(
