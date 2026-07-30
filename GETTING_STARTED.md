@@ -398,6 +398,20 @@ uv run python src/train.py --arm baseline --vocab 32768 --d-model 96 --n-layers 
 
 > 💡 **CPU 训练建议**：先跑 `--steps 50 --eval-every 10 --tag speedtest` 测速（约 3 分钟），看打印的 `s/step` 推算总时长，再决定是否启动全量 5000 步。注意用 `--tag speedtest` 避免测速产物覆盖真模型名。长任务建议在新开的 PowerShell 窗口里跑（不要在会话结束时关闭窗口），并确保电源设置"从不睡眠"。
 
+### 训练结果参考（已实机验证）
+
+| 指标 | 值 |
+|---|---|
+| 训练设备 | CPU (Intel, ~1.2s/step) |
+| 总耗时 | 5,000 步 ≈ **6,192 秒（~1.72 小时）** |
+| 训练 token 数 | 20.5M |
+| 最终验证 loss | 2.4329 |
+| **验证 perplexity** | **11.39**（从初始 33,036 收敛） |
+| 模型文件 | `runs/ple-cleandeploy-s42.pt`（~110 MB） |
+| 训练配置 | `runs/ple-cleandeploy-s42.json` |
+
+> 💡 CPU 训练速度受单核性能影响，上述数据基于普通 x86 CPU。若使用 NVIDIA GPU（如 T4），预计可在 30 分钟内完成。
+
 训练完成后，会在 `runs/` 目录下生成 `.pt` 和 `.json` 文件。
 
 ---
@@ -415,6 +429,8 @@ uv run python src/quantize.py --tag cleandeploy --seed 42
 # 导出为嵌入式 .bin 格式（默认加载 ple-cleandeploy-s42.pt）
 uv run python src/export.py ple-cleandeploy-s42
 ```
+
+> ✅ 实机验证：4-bit PTQ 后验证 loss 2.4806（ppl 11.95），相比 FP32 的 2.4238（ppl 11.29）退化仅 **+0.0569**，几乎无损。
 
 导出的文件：
 
