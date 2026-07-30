@@ -168,6 +168,79 @@ RLCD 使用的 SPI 引脚是 **GPIO11 (CLK)** 和 **GPIO12 (MOSI)**，而通用 
 python --version   # 确认显示 Python 3.12.x
 ```
 
+### 4.1.1 如果系统 Python 版本不满足要求（重要概念）
+
+> ⚠️ **核心概念澄清**：**虚拟环境（venv）≠ 独立的 Python 版本**。
+>
+> venv 只隔离 **包**（pip 包），**不切换解释器版本**。如果系统是 Python 3.10，用 `python -m venv venv` 建出来的环境依然是 3.10，不会变成 3.12。要换版本，必须**先安装一个满足要求的 Python 解释器**，再基于它建虚拟环境。
+
+当系统 Python 低于 3.12 时，有 4 种解法（按推荐度排序）：
+
+**方案 1（推荐）：用 uv 自动安装托管版 Python**
+
+uv 能自己下载独立 Python，**无需管理员权限、不污染系统 PATH**：
+
+```powershell
+cd D:\codes\esp32-ai
+uv python install 3.12      # uv 下载到 %APPDATA%\uv\python\
+uv python pin 3.12          # 项目级锁定，生成 .python-version 文件
+uv sync                     # 自动用 3.12 创建 .venv 并安装依赖
+```
+
+装好的 Python 只对 uv 可见，卸载也干净：`uv python uninstall 3.12`。
+
+**方案 2：从 python.org 安装官方包（传统方式）**
+
+到 https://www.python.org/downloads/ 下载 Python 3.12 安装包，安装时务必勾选 "Add to PATH"，然后用 py launcher 指定版本建 venv：
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install torch numpy requests tokenizers tqdm
+```
+
+缺点：污染系统 PATH，多版本切换麻烦，需要管理员权限。
+
+**方案 3：pyenv-win（适合同时维护多个老项目）**
+
+```powershell
+pyenv install 3.12.8
+pyenv local 3.12.8      # 在当前目录固定版本
+```
+
+单项目用 uv 已足够，无需再上 pyenv。
+
+**方案 4：Conda / Miniconda（深度学习场景）**
+
+```powershell
+conda create -n esp32-ai python=3.12
+conda activate esp32-ai
+pip install torch numpy requests tokenizers tqdm
+```
+
+本项目用 uv 完全够，没必要引入 conda 的复杂度。
+
+**四种方案对比：**
+
+| 维度 | uv install | python.org 官方包 | pyenv-win | conda |
+|---|---|---|---|---|
+| 学习成本 | ⭐ 最低 | ⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐⭐ |
+| 需要 admin 权限 | ❌ 不需要 | ✅ 需要 | ❌ | ❌ |
+| 污染系统 PATH | ❌ 完全隔离 | ✅ 改 PATH | ⚠️ 改 PATH | ⚠️ 较重 |
+| 与本项目契合 | ✅ 教程就用 uv | ⚠️ 与 uv 并存 | ⚠️ 冗余 | ❌ 大材小用 |
+| 装包速度 | 🚀 最快（uv） | 🐢 pip | 🐢 pip | 🐢 conda/pip |
+| 磁盘占用 | ~50MB | ~80MB | 按版本叠加 | ~500MB+ |
+
+> 💡 **本项目的最终答案**：无论系统装没装 Python 3.12，只需三条命令即可全部搞定：
+>
+> ```powershell
+> uv python install 3.12
+> uv python pin 3.12
+> uv sync
+> ```
+>
+> Python 解释器、虚拟环境、所有依赖全自动管理。这就是教程选 uv 而不是 pip/conda 的根本原因——让"装对 Python 版本"这件事从一次手工折腾变成一条命令。
+
 ### 4.2 uv（Python 包管理器）
 
 ```powershell
@@ -205,8 +278,10 @@ arduino-cli core install esp32:esp32
 arduino-cli lib install "Adafruit GFX Library"
 arduino-cli lib install "Adafruit SH110X"      # 1.3寸 OLED
 arduino-cli lib install "Adafruit SSD1306"     # 0.96寸 OLED
-arduino-cli lib install "Adafruit ST7789"      # TFT 彩屏
+arduino-cli lib install "Adafruit ST7735 and ST7789 Library"  # TFT 彩屏
 ```
+
+> ⚠️ **库名变更提醒**：Arduino 库管理器里现已不存在单独的 `Adafruit ST7789`，必须用完整名 **`Adafruit ST7735 and ST7789 Library`**（安装会自动补齐 seesaw、SD 等依赖）。对 Waveshare RLCD-4.2 分支无影响——RLCD 用 ST7305 驱动，此库只是给可选的 2 寸 TFT 彩屏用。
 
 > **如果不接屏幕**，只需安装 `Adafruit GFX Library`。
 >
@@ -215,9 +290,14 @@ arduino-cli lib install "Adafruit ST7789"      # TFT 彩屏
 ### 4.5 安装 esptool（烧录工具）
 
 ```powershell
-uv pip install esptool
-esptool.py version   # 确认显示版本号
+# 推荐：用 uv 把 esptool 作为全局 CLI 工具安装（无需项目 venv）
+uv tool install esptool
+esptool version       # 确认显示版本号
 ```
+
+> ⚠️ **命令名变更提醒**：esptool 5.x 已把命令从 `esptool.py` 改名为 **`esptool`**（去掉了 `.py` 后缀）。本教程后续所有 `esptool.py ...` 命令都应写成 `esptool ...`。若坚持用旧名，需额外执行 `uv tool install esptool==4.8.1` 等老版本。
+>
+> 如果 `esptool` 命令找不到，重启终端让 uv 的工具目录（`%USERPROFILE%\.local\bin`）生效，或手动把该目录加入 PATH。
 
 ### 4.6 安装 MinGW（用于主机端 C 代码验证）
 
@@ -253,6 +333,16 @@ uv sync
 uv pip install torch numpy requests tokenizers tqdm
 ```
 
+> ⚠️ **国内网络必看：必须配置 PyPI 镜像，否则 torch 下载极慢**。直连 PyPI/PyTorch CDN 实测 30 分钟超时都下不完 torch；配置清华镜像后全部依赖可在 ~30 秒装完。
+>
+> ```powershell
+> # 安装前先设置镜像（仅对当前终端会话生效，不污染全局配置）
+> $env:UV_DEFAULT_INDEX = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
+> uv sync
+> ```
+>
+> 其他可选镜像：阿里云 `https://mirrors.aliyun.com/pypi/simple`、腾讯 `https://mirrors.cloud.tencent.com/pypi/simple`。若想永久生效，把 `UV_DEFAULT_INDEX` 加入系统环境变量，或写入 `uv.toml`。
+
 ---
 
 ## 6. 数据准备
@@ -269,15 +359,55 @@ uv run python data/prepare.py --vocab 32768
 
 **耗时约 2-5 分钟**（取决于网速）。
 
+> ⚠️ **国内网络必看：HuggingFace 直连不可达**。`data/prepare.py` 内部用 `requests` 硬编码了 `huggingface.co` 的下载地址（**不走 HF 客户端库，所以 `HF_ENDPOINT` 环境变量对它无效**），国内网络会因 SSL 证书验证失败而中断，卡在 `downloading first 300MB of TinyStories...`。
+>
+> **解决方案：用魔搭社区（ModelScope）镜像预下载 300MB 切片**。`prepare.py` 第 26 行会检测 `data/tinystories_slice.txt` 是否已存在（≥297MB），存在则跳过下载、直接进入 BPE 训练。因此只需预先把文件放到该路径即可，**无需改动项目代码**。
+>
+> 把下面保存为项目根目录下的 `fetch_tinystories_cn.py` 并运行：
+>
+> ```python
+> # fetch_tinystories_cn.py —— 从魔搭镜像下载 300MB TinyStories 切片
+> import os, requests
+> RAW = "data/tinystories_slice.txt"
+> URL = "https://www.modelscope.cn/datasets/AI-ModelScope/TinyStories/resolve/master/TinyStories-train.txt"
+> SLICE = 300 * 1024 * 1024   # 必须与 prepare.py 的 SLICE_BYTES 一致
+> os.makedirs("data", exist_ok=True)
+> got = 0
+> with requests.get(URL, stream=True, timeout=60) as r:
+>     r.raise_for_status()
+>     with open(RAW, "wb") as f:
+>         for c in r.iter_content(1 << 20):
+>             f.write(c); got += len(c)
+>             if got >= SLICE: break
+> print("done", os.path.getsize(RAW) // (1024 * 1024), "MB")
+> ```
+>
+> ```powershell
+> uv run python fetch_tinystories_cn.py        # ~74 秒下完 300MB
+> uv run python data/prepare.py --vocab 32768  # 检测到文件已存在，跳过下载，直接训练 BPE
+> ```
+>
+> **三个数据源实测速度对比**（下载 300MB 切片）：
+>
+> | 源 | 速度 | 300MB 耗时 | 可用性（国内） |
+> |---|---|---|---|
+> | huggingface.co（直连） | — | — | ❌ SSL 验证失败，不可达 |
+> | hf-mirror.com | ~1.8 MB/s | ~3 分钟 | ✅ 可用 |
+> | **魔搭 ModelScope** | **~4.3 MB/s** | **~74 秒** | ✅ **最快，推荐** |
+>
+> 魔搭的 `AI-ModelScope/TinyStories` 与 HuggingFace 的 `roneneldan/TinyStories` 是同一数据集的官方镜像，内容完全一致。
+
 ---
 
-## 7. 训练模型（可选）
+## 7. 训练模型（可选，但当前无法跳过）
 
-> **新手强烈建议跳过这一步**。训练需要 GPU（NVIDIA 显卡），纯 CPU 训练会非常慢（数天）。
+> ⚠️ **重要更正：预训练模型实际上不存在，无法下载。** 早期版本教程写过"你可以直接下载预训练好的模型文件，跳到步骤 8"——但这是空头承诺。经全面核查（HuggingFace / ModelScope / GitHub Releases / 仓库本身），作者**从未发布过** `ple-cleandeploy-s42.pt`，`runs/` 目录也被 `.gitignore` 排除。已有用户在 [Issue #5](https://github.com/slvDev/esp32-ai/issues/5) 提出相同请求，作者暂未回复。**因此必须自己训练产出 `.pt`，才能进入第 8 节。**
 >
-> 你可以直接下载预训练好的模型文件，跳到步骤 8。
+> **好消息：CPU 训练完全可行，不必"数天"。** 教程原说"纯 CPU 训练会非常慢（数天）"是按最重配置（batch 32 / seq 512）的悲观估计。实际用下面的 deploy 配置（batch 16 / seq 256，计算量仅 1/4）在普通 CPU 上**实测 ~3.3 秒/步，5000 步约 4.5 小时**（过夜跑完）。`src/train.py` 的 `get_device()` 会自动回退到 CPU，无需任何改动。
+>
+> **AMD 显卡用户**：Windows 上 PyTorch 不支持 ROCm，会自动回退 CPU 训练（同上，~4.5h）。只有 NVIDIA CUDA 才能 GPU 加速。若想更快，可用国内云 GPU（AutoDL/阿里云，T4 约 ¥1-2/小时，30 分钟跑完）。
 
-如果你有 NVIDIA GPU（8GB+ VRAM）：
+训练命令（NVIDIA GPU / CPU / AMD 都用同一条，`get_device()` 自动选设备）：
 
 ```powershell
 # 训练 PLE 模型（28.9M 参数，推荐）
@@ -290,6 +420,8 @@ uv run python src/train.py --arm baseline --vocab 32768 --d-model 96 --n-layers 
   --ple-dim 128 --target-core 560000 --batch-size 16 --seq-len 256 `
   --steps 5000 --seed 42 --tag cleandeploy
 ```
+
+> 💡 **CPU 训练建议**：先跑 `--steps 50 --eval-every 10 --tag speedtest` 测速（约 3 分钟），看打印的 `s/step` 推算总时长，再决定是否启动全量 5000 步。注意用 `--tag speedtest` 避免测速产物覆盖真模型名。长任务建议在新开的 PowerShell 窗口里跑（不要在会话结束时关闭窗口），并确保电源设置"从不睡眠"。
 
 训练完成后，会在 `runs/` 目录下生成 `.pt` 和 `.json` 文件。
 
@@ -338,13 +470,17 @@ uv run python src/gen_assets.py
 在烧录到 ESP32 之前，先在电脑上验证 C 实现和 PyTorch 计算结果一致：
 
 ```powershell
-# 方案1：用 Git Bash（推荐 Windows 用户）
+# 方案1（推荐）：用 WSL（已装 gcc 11.4+ 的 Ubuntu 最省事）
+# 在 PowerShell 里直接调用，WSL 通过 /mnt/d 访问 Windows 的 D 盘：
+wsl -e bash -c "cd /mnt/d/codes/esp32-ai && gcc -O3 -o /tmp/esp32-llm-verify firmware/host_verify/verify.c -lm && /tmp/esp32-llm-verify firmware/model/model.bin firmware/model/golden.txt"
+
+# 方案2：用 Git Bash
 # 打开 Git Bash，执行：
 cd /d/codes/esp32-ai
 gcc -O3 -o /tmp/esp32-llm-verify firmware/host_verify/verify.c -lm
 /tmp/esp32-llm-verify firmware/model/model.bin firmware/model/golden.txt
 
-# 方案2：用 PowerShell + MinGW
+# 方案3：用 PowerShell + MinGW（需先装 MinGW-w64 并加入 PATH）
 gcc -O3 -o $env:TEMP\esp32-llm-verify.exe firmware/host_verify/verify.c -lm
 & $env:TEMP\esp32-llm-verify.exe firmware/model/model.bin firmware/model/golden.txt
 ```
@@ -383,12 +519,30 @@ arduino-cli core install esp32:esp32
 
 ### 12.1 找到 COM 口
 
+> ⚠️ **COM 端口号必须实测确认，不能假定是 COM3**。不同机器、不同 USB 口、是否插了其他串口设备都会改变编号（常见 COM3/COM5/COM7/COM10 等）。下面所有命令里的 `COM3` 都要替换成你**实测**到的端口号。
+
+**方法 A（推荐，命令行实测）：插上 ESP32 后执行**
+```powershell
+arduino-cli board list          # 列出所有串口和识别到的板子
+# 或用 PowerShell 直接枚举：
+[System.IO.Ports.SerialPort]::GetPortNames()
+```
+`arduino-cli board list` 会显示类似：
+```
+Port         Protocol Type      Board Name         FQBN Core
+COM7         serial  Serial    ESP32-S3 Module
+```
+记下这里的 `COM7`（你的实际端口）。
+
+**方法 B：用设备管理器**
 1. 把 ESP32-S3 用 USB 线连接到电脑
 2. 打开 **设备管理器** → 展开 **端口（COM 和 LPT）**
 3. 应看到 `USB Serial Device (COM3)` 或 `ESP32-S3 (COM4)`
 4. 记下这个 COM 端口号（下面假设是 COM3）
 
 > **如果设备管理器没有显示**：换一根能传数据的数据线。ESP32-S3 内置 USB CDC，Windows 10/11 自动识别，无需额外驱动。
+>
+> **拔插对比法**：先看一次 `arduino-cli board list`，插上 ESP32 再看一次，新出现的那一行就是你的板子和端口，最可靠。
 
 ### 12.2 烧录固件
 
@@ -403,8 +557,10 @@ arduino-cli upload `
 ### 12.3 烧录模型数据
 
 ```powershell
-esptool.py --chip esp32s3 --port COM3 --baud 921600 write_flash 0x110000 firmware\model\model.bin
+esptool --chip esp32s3 --port COM3 --baud 921600 write_flash 0x110000 firmware\model\model.bin
 ```
+
+> ⚠️ **命令名变更**：esptool 5.x 已把 `esptool.py` 改名为 `esptool`。`COM3` 请替换为 12.1 节实测到的实际端口。
 
 **写入约 15MB 数据，需 2-5 分钟**。不要中断烧录过程。
 
@@ -445,7 +601,7 @@ profile ms/token: input 4.4 | attn 25.6 | ffn 6.9 | ple 8.5 | head 57.6
 
 | 启动信息 | 含义 | 处理方法 |
 |---|---|---|
-| `model partition not found` | 模型分区未烧录或烧录失败 | 重新执行 `esptool.py write_flash` |
+| `model partition not found` | 模型分区未烧录或烧录失败 | 重新执行 `esptool write_flash` |
 | `bad model magic` | model.bin 文件损坏 | 重新执行 `export.py` |
 | 串口完全无输出 | 波特率不匹配或端口错误 | 确认 `--baudrate 115200` 和端口号 |
 | 持续重启循环 | 看门狗超时或供电不足 | 换 USB 口或加外部电源 |
@@ -736,7 +892,7 @@ static void display_stats(float tok_s, float ms) {
 |---|---|---|
 | `python` 命令找不到 | Python 未加入 PATH | 重新安装 Python，勾选 "Add to PATH" |
 | `arduino-cli` 命令找不到 | 未加入 PATH | 手动把 arduino-cli 目录加入系统 PATH |
-| `esptool.py` 命令找不到 | esptool 未安装 | `uv pip install esptool` |
+| `esptool` 命令找不到 | esptool 未安装或未加入 PATH | `uv tool install esptool`，重启终端；或把 `%USERPROFILE%\.local\bin` 加入 PATH |
 | `gcc` 命令找不到 | MinGW 未安装或未加入 PATH | 安装 MinGW-w64 并加入 PATH |
 | `uv` 命令找不到 | uv 未安装 | 重新执行 uv 安装命令 |
 
@@ -771,7 +927,7 @@ static void display_stats(float tok_s, float ms) {
 
 | 症状 | 解决方案 |
 |---|---|
-| `model partition not found` | 模型数据没烧录成功，重新 `esptool.py write_flash` |
+| `model partition not found` | 模型数据没烧录成功，重新 `esptool write_flash` |
 | `bad model magic` | model.bin 损坏，重新 `export.py` |
 | 串口输出乱码 | 检查波特率设置是否是 `115200` |
 | 故事全是重复词 "the the the" | 模型没训练好或加载错误 |
@@ -850,7 +1006,7 @@ static void display_stats(float tok_s, float ms) {
 |---|---|
 | 编译固件 | `arduino-cli compile --fqbn '...' --build-property compiler.optimization_flags=-O3 --build-path D:\esp32-build firmware\esp32_llm` |
 | 烧录固件 | `arduino-cli upload -p COM3 --fqbn '...' --input-dir D:\esp32-build` |
-| 烧录模型 | `esptool.py --chip esp32s3 --port COM3 --baud 921600 write_flash 0x110000 firmware\model\model.bin` |
+| 烧录模型 | `esptool --chip esp32s3 --port COM3 --baud 921600 write_flash 0x110000 firmware\model\model.bin` |
 | 串口监视 | `arduino-cli monitor -p COM3 --config baudrate=115200` |
 
 ---
