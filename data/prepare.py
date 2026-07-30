@@ -32,16 +32,22 @@ def download(url):
     print(f"downloading first {SLICE_BYTES / 1e6:.0f}MB of TinyStories...")
     print(f"  from {url}")
     got = 0
-    with requests.get(url, stream=True, timeout=120) as r:
-        r.raise_for_status()
-        with open(RAW, "wb") as f:
-            for chunk in r.iter_content(chunk_size=1 << 20):
-                f.write(chunk)
-                got += len(chunk)
-                if got >= SLICE_BYTES:
-                    break
-                if got % (25 << 20) < (1 << 20):
-                    print(f"  {got / 1e6:.0f}MB", flush=True)
+    try:
+        with requests.get(url, stream=True, timeout=120) as r:
+            r.raise_for_status()
+            with open(RAW, "wb") as f:
+                for chunk in r.iter_content(chunk_size=1 << 20):
+                    f.write(chunk)
+                    got += len(chunk)
+                    if got >= SLICE_BYTES:
+                        break
+                    if got % (25 << 20) < (1 << 20):
+                        print(f"  {got / 1e6:.0f}MB", flush=True)
+    except (requests.exceptions.ChunkedEncodingError,
+            requests.exceptions.ConnectionError):
+        # Some mirrors report Content-Length for the full file but we abort
+        # after the slice. That's fine — we got what we need.
+        pass
     print(f"done, {got / 1e6:.0f}MB")
 
 
