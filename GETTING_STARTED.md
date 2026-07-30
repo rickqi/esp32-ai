@@ -658,6 +658,42 @@ throughput: 9.76 tok/s   (102.9 ms/token)
 profile ms/token: input 4.4 | attn 25.6 | ffn 6.9 | ple 8.5 | head 57.6
 ```
 
+<details>
+<summary>✅ 首次烧录实测记录（commit 930bde2 / ple-cleandeploy-s42，ESP32-S3 N16R8）</summary>
+
+**启动诊断**（与 `firmware/esp32_llm/README.md` 预期基本一致）：
+
+```
+=== ESP32-S3 PLE TinyLM ===
+model: V=32768 D=96 L=6 H=4 F=66 P=128  (mapped 15.6 MB)
+head staged int8: 2.54 MB          (README 预期 2.53 MB ✅)
+PSRAM free after alloc: 4326 KB    (README 预期 ~5100 KB，接近)
+
+{"ready":true}            ← 新固件（commit da5ff83）等待串口输入自定义 prompt
+[timeout] using demo prompt   ← PROMPT_TIMEOUT_MS 超时后回退默认开头 "Once upon a time"
+```
+
+**端侧生成的故事**（逐 token、无网络、全在芯片本地）：
+
+> Once upon a time, there was a little girl named Lily. She loved to play with it, but her mom said no. Lily was sad and started to cry. Her mom came to her and saw what happened.
+
+28.9M 参数模型在 ESP32-S3 上跑通，输出连贯、语法正确。
+
+**⚠️ 观察到一个非致命问题：I2C 报错刷屏。** 生成期间大量重复：
+
+```
+[E][esp32-hal-i2c-ng.c:275] i2cWrite(): i2c_master_transmit failed: [259] ESP_ERR_INVALID_STATE
+```
+
+**不影响生成**（故事照常产出），但噪音很大。原因：固件默认 `DISPLAY_KIND = DISPLAY_OLED_I2C`，在尝试往 I2C 显示屏写每 token，但板子没接 OLED（或用的是 RLCD-4.2）。处理见 13.4 表与第 14 节。
+
+**下一步建议**：
+1. 消除 I2C 噪音：按 14.5 节设 `USE_DISPLAY 0`（纯串口）或 14.3 节设 `DISPLAY_RLCD_ST7305`（真屏幕），重编译重烧固件（model.bin 不用重烧）。
+2. 交互式 prompt：用 `tools/send_prompt.py` 或直接串口发文本，试 "The dragon" 等自定义开头（需在 `{"ready":true}` 后的超时窗口内发送）。
+3. 测速：等一个完整 200-token 故事跑完，确认 `throughput` 是否到 ~9.5 tok/s。
+
+</details>
+
 ### 13.4 常见启动问题
 
 | 启动信息 | 含义 | 处理方法 |
@@ -666,6 +702,7 @@ profile ms/token: input 4.4 | attn 25.6 | ffn 6.9 | ple 8.5 | head 57.6
 | `bad model magic` | model.bin 文件损坏 | 重新执行 `export.py` |
 | 串口完全无输出 | 波特率不匹配或端口错误 | 确认 `--baudrate 115200` 和端口号 |
 | 持续重启循环 | 看门狗超时或供电不足 | 换 USB 口或加外部电源 |
+| `i2cWrite(): i2c_master_transmit failed: ESP_ERR_INVALID_STATE` 刷屏 | **非致命**。固件默认 `DISPLAY_OLED_I2C` 在往未连接的 OLED 写每 token | 生成不受影响可忽略；要清静见 14.5（`USE_DISPLAY 0`）或 14.3（改 `DISPLAY_RLCD_ST7305`）后重编译重烧 |
 
 ---
 
