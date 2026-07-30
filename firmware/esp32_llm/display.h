@@ -182,6 +182,7 @@ static void display_stats(float tok_s, float ms) {
 #elif DISPLAY_KIND == DISPLAY_RLCD_ST7305
 
 #include <stdio.h>
+#include <time.h>
 #include <esp_timer.h>
 #include "display_bsp.h"
 
@@ -566,12 +567,12 @@ static void display_draw_footer(float tok_s, float ms) {
   rlcd_draw_text_inv(x + 84, y, "28.9M");
   // Hardware: "S3-N16R8" (8 chars) at x+84+5*CW+6 = x+84+36 = x+120
   rlcd_draw_text_inv(x + 120, y, "S3-N16R8");
-  // Date/time (placeholder: uptime as UP+hh:mm, right-anchored, 8 chars)
-  uint64_t uptime_us = esp_timer_get_time();
-  int up_hrs = (int)(uptime_us / 3600000000ULL);
-  int up_min = (int)((uptime_us / 60000000ULL) % 60);
-  snprintf(buf, sizeof(buf), "UP%02d:%02d", up_hrs, up_min);  // "UP00:05" (8 chars)
-  rlcd_draw_text_inv(TEXT_RIGHT - 8 * CW, y, buf);  // right-anchored at TEXT_RIGHT-48
+  // Date/time from system clock (set by PCF85063 RTC via settimeofday,
+  // or defaults to 0 if no RTC).  Format: "MM/DD HH:MM" (11 chars, right-anchored).
+  time_t now = time(NULL);
+  struct tm *ti = localtime(&now);
+  strftime(buf, sizeof(buf), "%m/%d %H:%M", ti);
+  rlcd_draw_text_inv(TEXT_RIGHT - 11 * CW, y, buf);
   rlcd->RLCD_Display();
 }
 

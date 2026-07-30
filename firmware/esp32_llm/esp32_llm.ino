@@ -8,6 +8,7 @@
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include <mbedtls/base64.h>
+#include <Wire.h>
 #define LLM_PROFILE 1
 #define LLM_PROFILE_NOW() esp_timer_get_time()
 #include "../common/llm.h"
@@ -302,10 +303,48 @@ static void run_generation() {
   blink(0);
 }
 
+// ---- PCF85063 RTC (Waveshare RLCD-4.2 onboard, I2C: SDA=13, SCL=14) --------
+// Read the hardware RTC and set the ESP32 system clock via settimeofday().
+static void init_pcf85063() {
+  Wire.begin(13, 14);
+  Wire.setClock(100000);
+  delay(10);
+  // Read 7 registers starting at 0x04 (seconds, minutes, hours, day, wday, month, year)
+  Wire.beginTransmission(0x51);
+  Wire.write(0x04);
+  if (Wire.endTransmission(false) != 0) { return; }  // no ACK = no RTC
+  Wire.requestFrom(0x51, 7);
+  if (Wire.available() < 7) return;
+  byte sec  = Wire.read() & 0x7F;   // clear OS flag (bit 7)
+  byte min  = Wire.read() & 0x7F;
+  byte hour = Wire.read() & 0x3F;
+  byte day  = Wire.read() & 0x3F;
+  Wire.read();                       // weekday — not used
+  byte mon  = Wire.read() & 0x1F;
+  byte yr   = Wire.read();
+  // BCD → binary
+  int ss = (sec >> 4) * 10 + (sec & 0x0F);
+  int mm = (min >> 4) * 10 + (min & 0x0F);
+  int hh = (hour >> 4) * 10 + (hour & 0x0F);
+  int dd = (day >> 4) * 10 + (day & 0x0F);
+  int mo = ((mon >> 4) * 10 + (mon & 0x0F)) - 1;  // tm_mon 0-11
+  int yy = ((yr >> 4) * 10 + (yr & 0x0F)) + 2000; // full year
+  if (ss > 59 || mm > 59 || hh > 23 || dd < 1 || dd > 31 || mo > 12) return;
+  struct tm tm = {0};
+  tm.tm_sec = ss; tm.tm_min = mm; tm.tm_hour = hh;
+  tm.tm_mday = dd; tm.tm_mon = mo; tm.tm_year = yy - 1900;
+  time_t t = mktime(&tm);
+  if (t < 1700000000) return;  // sanity: year must be >= 2023
+  struct timeval tv = { .tv_sec = t };
+  settimeofday(&tv, NULL);
+  Serial.println("RTC: time set from PCF85063");
+}
+
 void setup() {
   Serial.begin(115200);
   delay(1500);
   Serial.println("\n=== ESP32-S3 PLE TinyLM ===");
+  init_pcf85063();  // try PCF85063 RTC → settimeofday() for real date/time
 
   // Map the model partition.
   const esp_partition_t *part = esp_partition_find_first(
