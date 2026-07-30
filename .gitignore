@@ -24,3 +24,6 @@ videos/
 *.mov
 *.MOV
 *.MP4
+
+# opencode agent working state
+.omo/
