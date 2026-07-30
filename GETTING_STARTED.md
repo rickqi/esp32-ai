@@ -532,7 +532,53 @@ arduino-cli core install esp32:esp32
 
 ## 12. 烧录到 ESP32-S3
 
-### 12.1 找到 COM 口
+### 12.1 烧录前核查：分区表与 model.bin 容量（重要）
+
+> ⚠️ **烧 model.bin 前必须确认它装得进 `model` 分区**。固件用自定义分区表（`PartitionScheme=custom`），model.bin 烧到 `0x110000`，必须落在分区表里那个偏移、且尺寸不超过该分区容量，否则会越界覆盖相邻分区（coredump / 越过 16MB Flash 末尾）导致设备启动异常或数据损坏。
+
+**分区表**（`firmware/esp32_llm/partitions.csv`，编译时固化进 `esp32_llm.ino.partitions.bin`）：
+
+```
+# Name,    Type, SubType, Offset,    Size,      Flags
+nvs,       data, nvs,     0x9000,    0x5000,
+factory,   app,  factory, 0x10000,   0x100000,   # 固件（665KB）
+model,     data, 0x40,    0x110000,  0xEE0000,   # ← model.bin 落这里
+coredump,  data, coredump,0xFF0000,  0x10000,
+```
+
+**Flash 布局（16MB 完整映射，首尾相接无重叠）：**
+
+| 偏移 | 分区 | 大小 | 用途 | 校验 |
+|---|---|---|---|---|
+| `0x0` | bootloader | ~20KB | 启动加载器（arduino-cli 自动烧） | ✅ |
+| `0x8000` | partition table | 3KB | 分区表本身（arduino-cli 自动烧） | ✅ |
+| `0x9000` | nvs | 20KB | 非易失配置 | — |
+| `0x10000` | factory | 1MB | **固件**（实测 665KB，余 359KB） | ✅ 放得下 |
+| `0x110000` | **model** | **14.875MB** | **model.bin**（实测 14.22MB，余 0.65MB） | ✅ 放得下 |
+| `0xFF0000` | coredump | 64KB | 崩溃转储，收尾到 16MB | ✅ |
+
+**关键核查（实测，commit 930bde2 / ple-cleandeploy-s42）：**
+
+```
+model.bin:   14,912,332 bytes  (14.2215 MB)
+model 分区:  15,597,568 bytes  (14.8750 MB)  [0xEE0000]
+余量:           685,236 bytes  (0.65 MB)      ← 为正 = 放得下 ✅
+0x110000 % 0x1000 == 0                       ← 4KB 扇区对齐，esptool 可写 ✅
+esptool write_flash 0x110000 == 分区 offset   ← 地址一致 ✅
+```
+
+**自查命令**（烧录前跑一遍，确认你自己的 model.bin 也放得下）：
+
+```powershell
+$mb = (Get-Item firmware\model\model.bin).Length
+$part = 0xEE0000
+"model.bin {0:N0} bytes / partition {1:N0} bytes / 余 {2:N0} bytes" -f $mb, $part, ($part-$mb)
+# 余量为正 = OK；为负 = model.bin 太大，需调大 model 分区或重新量化
+```
+
+> 💡 **关于 SHA-256 差异**：`firmware/esp32_llm/README.md` 里记录的 `21067f5d...` 是原作者测量用模型的指纹。你自己训练导出的 model.bin（如 `ple-cleandeploy-s42`）SHA 会不同（本机实测 `0b62d4cb...`）——这是**预期**的，只要第 10 节主机验证 PASS（max abs diff ≤ 1e-5）就说明这个 model.bin 数值正确，可放心烧。
+
+### 12.2 找到 COM 口
 
 > ⚠️ **COM 端口号必须实测确认，不能假定是 COM3**。不同机器、不同 USB 口、是否插了其他串口设备都会改变编号（常见 COM3/COM5/COM7/COM10 等）。下面所有命令里的 `COM3` 都要替换成你**实测**到的端口号。
 
@@ -559,7 +605,7 @@ COM7         serial  Serial    ESP32-S3 Module
 >
 > **拔插对比法**：先看一次 `arduino-cli board list`，插上 ESP32 再看一次，新出现的那一行就是你的板子和端口，最可靠。
 
-### 12.2 烧录固件
+### 12.3 烧录固件
 
 ```powershell
 arduino-cli upload `
@@ -569,13 +615,13 @@ arduino-cli upload `
   firmware\esp32_llm
 ```
 
-### 12.3 烧录模型数据
+### 12.4 烧录模型数据
 
 ```powershell
 esptool --chip esp32s3 --port COM3 --baud 921600 write_flash 0x110000 firmware\model\model.bin
 ```
 
-> ⚠️ **命令名变更**：esptool 5.x 已把 `esptool.py` 改名为 `esptool`。`COM3` 请替换为 12.1 节实测到的实际端口。
+> ⚠️ **命令名变更**：esptool 5.x 已把 `esptool.py` 改名为 `esptool`。`COM3` 请替换为 12.2 节实测到的实际端口。
 
 **写入约 15MB 数据，需 2-5 分钟**。不要中断烧录过程。
 
