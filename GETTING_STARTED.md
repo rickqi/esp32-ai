@@ -349,53 +349,28 @@ uv pip install torch numpy requests tokenizers tqdm
 
 ```powershell
 cd D:\codes\esp32-ai
+
+# 国内用户推荐用魔搭镜像下载（~74 秒 300MB）
+uv run python data/prepare.py --vocab 32768 --mirror modelscope
+
+# 海外用户用 HuggingFace 直连
 uv run python data/prepare.py --vocab 32768
 ```
 
 这一步会：
-1. 从 HuggingFace 下载 TinyStories 数据集前 300MB
+1. 从 HuggingFace 或魔搭下载 TinyStories 数据集前 300MB
 2. 训练 BPE tokenizer（词汇量 32768）
 3. 生成 `data/train_v32768.bin` + `data/val_v32768.bin`
 
-**耗时约 2-5 分钟**（取决于网速）。
+**国内网络场景**：如果直连 HuggingFace 失败，加上 `--mirror modelscope` 会自动切换到魔搭镜像地址（`AI-ModelScope/TinyStories` 与官方数据集内容完全一致）。
 
-> ⚠️ **国内网络必看：HuggingFace 直连不可达**。`data/prepare.py` 内部用 `requests` 硬编码了 `huggingface.co` 的下载地址（**不走 HF 客户端库，所以 `HF_ENDPOINT` 环境变量对它无效**），国内网络会因 SSL 证书验证失败而中断，卡在 `downloading first 300MB of TinyStories...`。
->
-> **解决方案：用魔搭社区（ModelScope）镜像预下载 300MB 切片**。`prepare.py` 第 26 行会检测 `data/tinystories_slice.txt` 是否已存在（≥297MB），存在则跳过下载、直接进入 BPE 训练。因此只需预先把文件放到该路径即可，**无需改动项目代码**。
->
-> 把下面保存为项目根目录下的 `fetch_tinystories_cn.py` 并运行：
->
-> ```python
-> # fetch_tinystories_cn.py —— 从魔搭镜像下载 300MB TinyStories 切片
-> import os, requests
-> RAW = "data/tinystories_slice.txt"
-> URL = "https://www.modelscope.cn/datasets/AI-ModelScope/TinyStories/resolve/master/TinyStories-train.txt"
-> SLICE = 300 * 1024 * 1024   # 必须与 prepare.py 的 SLICE_BYTES 一致
-> os.makedirs("data", exist_ok=True)
-> got = 0
-> with requests.get(URL, stream=True, timeout=60) as r:
->     r.raise_for_status()
->     with open(RAW, "wb") as f:
->         for c in r.iter_content(1 << 20):
->             f.write(c); got += len(c)
->             if got >= SLICE: break
-> print("done", os.path.getsize(RAW) // (1024 * 1024), "MB")
-> ```
->
-> ```powershell
-> uv run python fetch_tinystories_cn.py        # ~74 秒下完 300MB
-> uv run python data/prepare.py --vocab 32768  # 检测到文件已存在，跳过下载，直接训练 BPE
-> ```
->
-> **三个数据源实测速度对比**（下载 300MB 切片）：
->
-> | 源 | 速度 | 300MB 耗时 | 可用性（国内） |
-> |---|---|---|---|
-> | huggingface.co（直连） | — | — | ❌ SSL 验证失败，不可达 |
-> | hf-mirror.com | ~1.8 MB/s | ~3 分钟 | ✅ 可用 |
-> | **魔搭 ModelScope** | **~4.3 MB/s** | **~74 秒** | ✅ **最快，推荐** |
->
-> 魔搭的 `AI-ModelScope/TinyStories` 与 HuggingFace 的 `roneneldan/TinyStories` 是同一数据集的官方镜像，内容完全一致。
+**三个数据源实测速度对比**（下载 300MB 切片）：
+
+| 源 | 速度 | 300MB 耗时 | 国内可用 |
+|---|---|---|---|
+| huggingface.co（直连） | — | — | ❌ 不可达 |
+| hf-mirror.com | ~1.8 MB/s | ~3 分钟 | ✅ |
+| **魔搭 ModelScope** | **~4.3 MB/s** | **~74 秒** | ✅ **最快** |
 
 ---
 
