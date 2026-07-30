@@ -14,7 +14,7 @@
 
 // Set to 1 once a GMT020-02-7P (2.0" 240x320 ST7789) is wired up — see display.h.
 // Leave 0 to run serial-only (no panel needed).
-#define USE_DISPLAY 1
+#define USE_DISPLAY 0
 #if USE_DISPLAY
 #include "display.h"
 #endif
