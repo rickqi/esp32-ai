@@ -7,15 +7,18 @@
 #include "esp_partition.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
+#include <mbedtls/base64.h>
 #define LLM_PROFILE 1
 #define LLM_PROFILE_NOW() esp_timer_get_time()
 #include "../common/llm.h"
 #include "vocab.h"
 
-// Set to 1 once a GMT020-02-7P (2.0" 240x320 ST7789) is wired up — see display.h.
+// Set to 1 once a display panel is wired up -- see display.h.
 // Leave 0 to run serial-only (no panel needed).
-#define USE_DISPLAY 0
+#define USE_DISPLAY 1
 #if USE_DISPLAY
+// ST7305 RLCD (Waveshare ESP32-S3-RLCD-4.2): 4.2" 400x300 monochrome reflective LCD.
+#define DISPLAY_KIND DISPLAY_RLCD_ST7305
 #include "display.h"
 #endif
 
@@ -48,6 +51,66 @@ static void emit(int tok) {
   display_puts(bytes, len);
 #endif
 }
+
+#if USE_DISPLAY && DISPLAY_KIND == DISPLAY_RLCD_ST7305
+// ---- serial screenshot (PBM P4 -> base64, 72-char lines) --------------------
+// Protocol (identical to the reference wifi_sta project so PC tooling works):
+//   PC -> MCU:  "SHOOT\n"
+//   MCU -> PC:  "SCREENSHOT_START\n"
+//               <base64 of PBM, 72 chars per line>
+//               "SCREENSHOT_END\n"
+// PBM format (P4 binary): header "P4\n400 300\n", then 1-bit MSB-first,
+// top-to-bottom, 1=black 0=white.  Size: 50 bytes/row x 300 rows = 15000.
+static void take_screenshot() {
+  if (!rlcd) return;
+  int w = rlcd->GetWidth();
+  int h = rlcd->GetHeight();
+  int row_bytes = (w + 7) / 8;                    // 50 for 400px
+  char hdr[24];
+  int hdr_len = snprintf(hdr, sizeof(hdr), "P4\n%d %d\n", w, h);
+  int pbm_size = hdr_len + row_bytes * h;         // 13 + 15000 = 15013
+
+  uint8_t *pbm = (uint8_t *)malloc(pbm_size);
+  if (!pbm) { Serial.println("SCREENSHOT_ERROR: out of memory"); return; }
+  memcpy(pbm, hdr, hdr_len);
+
+  // Convert framebuffer -> PBM pixel data (row-major, MSB first, 1=black)
+  uint8_t *pdata = pbm + hdr_len;
+  for (int y = 0; y < h; y++) {
+    for (int bx = 0; bx < row_bytes; bx++) {
+      uint8_t byte = 0;
+      for (int b = 0; b < 8; b++) {
+        int x = bx * 8 + b;
+        if (x >= w) break;
+        if (rlcd->GetPixel(x, y) == ColorBlack)
+          byte |= (0x80 >> b);
+      }
+      *pdata++ = byte;
+    }
+  }
+
+  // Base64 encode
+  size_t b64_len = 0;
+  mbedtls_base64_encode(NULL, 0, &b64_len, pbm, pbm_size);
+  uint8_t *b64 = (uint8_t *)malloc(b64_len + 1);
+  if (!b64) { free(pbm); Serial.println("SCREENSHOT_ERROR: base64 alloc"); return; }
+  mbedtls_base64_encode(b64, b64_len, &b64_len, pbm, pbm_size);
+  b64[b64_len] = '\0';
+
+  Serial.println("SCREENSHOT_START");
+  const int chunk = 72;
+  for (size_t i = 0; i < b64_len; i += chunk) {
+    int remain = (int)b64_len - (int)i;
+    int len = (remain < chunk) ? remain : chunk;
+    Serial.write((const char *)b64 + i, len);
+    Serial.println();
+  }
+  Serial.println("SCREENSHOT_END");
+
+  free(b64);
+  free(pbm);
+}
+#endif
 
 Model model;
 Scratch s;
@@ -165,6 +228,17 @@ static int parse_json_prompt(const char *json, int *ids, int *n, int *max) {
 // Run the full generate loop using the last received prompt (recv_ids/recv_n).
 // Writes tokens to serial (raw text) and display, then emits a JSON done signal.
 static void run_generation() {
+#if USE_DISPLAY
+  display_home();
+#endif
+#if USE_DISPLAY && DISPLAY_KIND == DISPLAY_RLCD_ST7305
+  // TUI: border frame + 2x header + prompt prefix
+  display_draw_frame();
+  display_draw_header("ESP32-S3 PLE LLM");
+  display_draw_hline(DIV1_Y);
+  display_set_cursor(5, PRM_Y);
+  display_puts((const unsigned char *)"> ", 2);
+#endif
   int pos = 0, tok = 0;
   int64_t decode_us = 0;
   int decoded = 0;
@@ -174,6 +248,13 @@ static void run_generation() {
     emit(tok);
     llm_forward(&model, tok, pos++, &s);
   }
+
+#if USE_DISPLAY && DISPLAY_KIND == DISPLAY_RLCD_ST7305
+  // Fixed divider + output area (between prompt and footer)
+  display_draw_hline(DIV2_Y);
+  display_set_output_area(OUT_Y, DIV3_Y - 1);
+  display_set_cursor(5, OUT_Y);
+#endif
 
   llm_profile_reset(&s);
   int64_t t_start = esp_timer_get_time();
@@ -206,7 +287,14 @@ static void run_generation() {
                   s.profile.head_us / n);
   }
 #if USE_DISPLAY
-  display_stats(decoded * 1e6f / decode_us, decode_us / 1000.0f / decoded);
+  // Keep the generated story (prompt + output) visible on screen instead of
+  // overwriting with the stats card.  Stats are still printed to serial above.
+  // To restore the stats card, uncomment the next two lines:
+  // display_stats(decoded * 1e6f / decode_us, decode_us / 1000.0f / decoded);
+#endif
+#if USE_DISPLAY && DISPLAY_KIND == DISPLAY_RLCD_ST7305
+  // Fixed footer bar with perf + hardware info (does NOT clear the story)
+  display_draw_footer(decoded * 1e6f / decode_us, decode_us / 1000.0f / decoded);
 #endif
 
   // JSON completion marker: the PC script recognises this as end-of-stream.
@@ -297,7 +385,14 @@ void loop() {
     if (c == '\n') {
       line_buf[line_pos] = '\0';                     // null-terminate
       line_pos = 0;
-      if (line_buf[0] == '{' && parse_json_prompt(line_buf, recv_ids, &recv_n, &recv_max) == 0) {
+      if (strcmp(line_buf, "SHOOT") == 0) {
+#if USE_DISPLAY && DISPLAY_KIND == DISPLAY_RLCD_ST7305
+        take_screenshot();
+#else
+        Serial.println("SCREENSHOT_ERROR: no RLCD display");
+#endif
+      }
+      else if (line_buf[0] == '{' && parse_json_prompt(line_buf, recv_ids, &recv_n, &recv_max) == 0) {
         run_generation();
         Serial.println("{\"ready\":true}");           // signal ready for next prompt
       }
