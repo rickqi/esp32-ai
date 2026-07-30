@@ -305,39 +305,51 @@ static void run_generation() {
 
 // ---- PCF85063 RTC (Waveshare RLCD-4.2 onboard, I2C: SDA=13, SCL=14) --------
 // Read the hardware RTC and set the ESP32 system clock via settimeofday().
+// If RTC is unavailable or returns implausible time, falls back to the
+// compile-time date (so the footer always shows a reasonable timestamp).
 static void init_pcf85063() {
+  int yy = 0, mo = -1, dd = 0, hh = 0, mm = 0, ss = 0;
+  bool have_rtc = false;
   Wire.begin(13, 14);
   Wire.setClock(100000);
   delay(10);
-  // Read 7 registers starting at 0x04 (seconds, minutes, hours, day, wday, month, year)
+  // Read 7 RTC registers starting at 0x04 (sec/min/hour/day/wday/month/year)
   Wire.beginTransmission(0x51);
   Wire.write(0x04);
-  if (Wire.endTransmission(false) != 0) { return; }  // no ACK = no RTC
-  Wire.requestFrom(0x51, 7);
-  if (Wire.available() < 7) return;
-  byte sec  = Wire.read() & 0x7F;   // clear OS flag (bit 7)
-  byte min  = Wire.read() & 0x7F;
-  byte hour = Wire.read() & 0x3F;
-  byte day  = Wire.read() & 0x3F;
-  Wire.read();                       // weekday — not used
-  byte mon  = Wire.read() & 0x1F;
-  byte yr   = Wire.read();
-  // BCD → binary
-  int ss = (sec >> 4) * 10 + (sec & 0x0F);
-  int mm = (min >> 4) * 10 + (min & 0x0F);
-  int hh = (hour >> 4) * 10 + (hour & 0x0F);
-  int dd = (day >> 4) * 10 + (day & 0x0F);
-  int mo = ((mon >> 4) * 10 + (mon & 0x0F)) - 1;  // tm_mon 0-11
-  int yy = ((yr >> 4) * 10 + (yr & 0x0F)) + 2000; // full year
-  if (ss > 59 || mm > 59 || hh > 23 || dd < 1 || dd > 31 || mo > 12) return;
+  if (Wire.endTransmission(false) == 0) {
+    Wire.requestFrom(0x51, 7);
+    if (Wire.available() >= 7) {
+      ss = Wire.read() & 0x7F;  mm = Wire.read() & 0x7F;
+      hh = Wire.read() & 0x3F;  dd = Wire.read() & 0x3F;
+      Wire.read();  // skip weekday
+      mo = (Wire.read() & 0x1F) - 1;  // tm_mon 0-11
+      yy = ((Wire.read() >> 4) * 10 + (Wire.read() & 0x0F)) + 2000;
+      // Validate BCD ranges and year plausibility
+      have_rtc = (ss < 60 && mm < 60 && hh < 24 && dd > 0 && dd < 32
+                  && mo >= 0 && mo < 12 && yy >= 2026 && yy <= 2035);
+    }
+  }
   struct tm tm = {0};
-  tm.tm_sec = ss; tm.tm_min = mm; tm.tm_hour = hh;
-  tm.tm_mday = dd; tm.tm_mon = mo; tm.tm_year = yy - 1900;
+  if (have_rtc) {
+    tm.tm_sec = ss; tm.tm_min = mm; tm.tm_hour = hh;
+    tm.tm_mday = dd; tm.tm_mon = mo; tm.tm_year = yy - 1900;
+    Serial.printf("RTC: time set from PCF85063  %04d-%02d-%02d %02d:%02d\n",
+                  yy, mo+1, dd, hh, mm);
+  } else {
+    // Fallback: use the compile timestamp (__DATE__ "Mmm DD YYYY", __TIME__ "HH:MM:SS")
+    static const char *const MON[] = {"Jan","Feb","Mar","Apr","May","Jun",
+                                       "Jul","Aug","Sep","Oct","Nov","Dec"};
+    char mon_s[4] = ""; int dd_i = 0, yy_i = 0, hh_i = 0, mm_i = 0;
+    sscanf(__DATE__, "%3s %d %d", mon_s, &dd_i, &yy_i);
+    sscanf(__TIME__, "%d:%d", &hh_i, &mm_i);
+    for (int i = 0; i < 12; i++) if (strcmp(mon_s, MON[i]) == 0) { mo = i; break; }
+    tm.tm_mday = dd_i; tm.tm_mon = mo; tm.tm_year = yy_i - 1900;
+    tm.tm_hour = hh_i; tm.tm_min = mm_i; tm.tm_sec = 0;
+    Serial.println("RTC: not available, using compile-time date");
+  }
   time_t t = mktime(&tm);
-  if (t < 1700000000) return;  // sanity: year must be >= 2023
   struct timeval tv = { .tv_sec = t };
   settimeofday(&tv, NULL);
-  Serial.println("RTC: time set from PCF85063");
 }
 
 void setup() {
