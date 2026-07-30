@@ -484,6 +484,30 @@ PASS
 
 这意味着 C 语言的推理结果与 PyTorch 完全一致（误差 1e-5）。
 
+<details>
+<summary>✅ 实测记录（model.bin = 14.91 MB，ple-cleandeploy-s42）</summary>
+
+在本仓库当前 model.bin（commit 930bde2）上实跑 `verify.c`，输出：
+
+```
+loaded: V=32768 D=96 L=6 H=4 F=66 P=128 group=128  (14.91 MB)
+sample logits (idx: C vs ref):
+  [  265]  C=  8.0155  ref=  8.0155
+  [   14]  C=  6.8380  ref=  6.8380
+  [    1]  C=  7.7270  ref=  7.7270
+  [  100]  C=  0.6478  ref=  0.6478
+  [20000]  C= -2.3669  ref= -2.3669
+logits: C top=265  PyTorch top=265
+max abs diff = 0.00001   rms diff = 0.000001
+PASS: C matches PyTorch golden
+```
+
+- `max abs diff = 0.00001`：所有 32768 个 logit 中，C 实现与 PyTorch golden 的最大绝对误差，远低于 1e-4 的可接受阈值。
+- `C top=265 == PyTorch top=265`：argmax 一致，即两个实现会采样出**完全相同的下一个 token**。
+- 结论：设备端 C 推理与训练端 PyTorch 数值一致，可安全烧录。
+
+</details>
+
 ---
 
 ## 11. 编译固件
