@@ -175,3 +175,55 @@ firmware/model_chinese/  # (gitignored) model.bin, golden.npz, golden.txt
 - **纯预训练模型**：能生成领域风格文本（保险条款、临床指南），但不能问答/指令跟随（需 SFT 或 RAG）
 - 词表 5,901 字符基于当前语料；新增文档后应重新执行 prepare.py
 - D:\docs\raw 是 OCR 转换产物，含一定噪声；行级过滤已缓解但非完美
+
+---
+
+## 模型演进记录（zh2 → zh3 → zh4）
+
+### 版本演进
+
+| 版本 | 配置 | 参数量 | Core | 预训练 Val PPL | SFT Val PPL | model.bin |
+|---|---|---|---|---|---|---|
+| **zh2** | d64/l4/p64, core 280K | 2.17M | 280K | 12.69 | —（SFT 失败） | 1.13MB |
+| **zh3** | d128/l6/p128, core 1.5M | 6.79M | 1.5M | 8.74 | 12.0 | 3.51MB |
+| **zh4** | d160/l8/p192, core 2.5M | 12.51M | 2.5M | **7.64** | **9.5** | 6.49MB |
+| 英文 cleandeploy | d96/l6/p128, core 558K | 28.9M | 558K | 11.39 | — | 14.9MB |
+
+### 关键结论
+
+1. **规模提升有效**：预训练 PPL 随规模单调下降（12.69 → 8.74 → 7.64），SFT 质量同步提升（12.0 → 9.5）
+2. **SFT labels 修复是分水岭**：早期所有 SFT 因 labels 未右移（`label[i]=input_ids[i]` 而非 `input_ids[i+1]`）导致模型学习平凡复制任务、生成退化为单字符循环。修复后（`misaligned=0`）训练信号变为真实收敛
+3. **设备余量充足**：zh4 PSRAM 3.62MB/8MB、Flash 6.49MB/14.5MB、量化退化仅 +0.017，仍可继续扩大
+4. **与英文模型对比**：
+   - 英文 28.9M 中 **87%（25.2M）是 PLE table**（词表 32768 × 6 × 128 的自然结果）
+   - 中文词表小（5904），table 天然小（9.1M），total 追不平英文
+   - **但中文 core（2.5M）已是英文（558K）的 4.5 倍**——条件化/问答能力的关键指标中文更优
+5. **当前瓶颈是数据而非模型**：12.5M 参数 + 1059 条指令样本已足以记忆，但泛化受数据多样性限制
+
+### 建议（后续方向）
+
+| 方向 | 描述 | 优先级 |
+|---|---|---|
+| **扩充指令数据** | 1059 → 3000+ 条（WSL QA 生成器 + search_logs + 人工构造） | ⭐⭐⭐ 最高 |
+| **设备烧录验证** | zh4 model.bin 6.49MB 烧录 ESP32-S3，实测推理 | ⭐⭐⭐ 高 |
+| **RAG 增强** | 设备/PC 端检索 + 模型续写，绕开事实记忆限制 | ⭐⭐ 中 |
+| **进一步扩大** | 仍有 PSRAM 4.4MB / Flash 8MB 余量，可扩至 15-18M | ⭐ 低（收益递减） |
+
+### 复现命令
+
+```powershell
+# zh4 预训练（12.5M 参数）
+uv run python chinese/train.py --d-model 160 --n-layers 8 --n-heads 8 `
+  --ple-dim 192 --target-core 2500000 --steps 10000 --tag zh4
+
+# zh4 SFT（300 步，best val 9.5）
+uv run python chinese/sft/sft_train.py --resume runs_chinese/ple-zh4-s42.pt `
+  --steps 300 --eval-every 50 --instruction-ratio 0.8 --tag zh4-sft300
+
+# 量化导出
+uv run python chinese/quantize.py --tag zh4-sft300 --seed 42
+uv run python chinese/export.py ple-zh4-sft300-s42
+
+# 推理
+uv run python chinese/sft/sft_generate.py "甲状腺切除是否会造成晕倒" --tag zh4-sft300
+```
