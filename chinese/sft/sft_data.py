@@ -56,10 +56,14 @@ MAX_RESPONSE_CHARS = 3000      # drop absurdly long dumps
 # ---------------------------------------------------------------------------
 
 def pull_wsl_chatml():
-    """Copy the three WSL ChatML files into the raw archive."""
+    """Copy the WSL ChatML files into the raw archive.
+
+    Primary source is the merged med_instruction_chatml.json (includes
+    targeted-generation additions); val and cot stay separate.
+    """
     RAW_DIR.mkdir(parents=True, exist_ok=True)
     copied = []
-    for name in ["med_instruction_train_chatml.json",
+    for name in ["med_instruction_chatml.json",
                  "med_instruction_val_chatml.json",
                  "med_instruction_cot_chatml.json"]:
         src = WSL_DOCS / name
@@ -189,6 +193,48 @@ def clean_search_logs(pairs):
 #  Build samples
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+#  Synonym augmentation (Path B3)
+# ---------------------------------------------------------------------------
+
+SYNONYM_RULES = [
+    (r"^(.*?)如何治疗$", r"\1怎么治"),
+    (r"^(.*?)如何治疗$", r"\1的治疗方法"),
+    (r"^(.*?)是什么$", r"什么是\1"),
+    (r"^(.*?)有哪些$", r"\1包括哪些"),
+    (r"^(.*?)有哪些$", r"列举\1"),
+    (r"^(.*?)的临床表现$", r"\1有什么症状"),
+    (r"^(.*?)的临床表现$", r"\1的典型表现"),
+    (r"^(.*?)的预防措施$", r"如何预防\1"),
+    (r"^(.*?)的禁忌证$", r"\1的禁忌情况"),
+    (r"^(.*?)的适应证$", r"哪些情况适合\1"),
+    (r"^(.*?)怎么(.*)$", r"\1如何\2"),
+    (r"^(.*?)如何处理$", r"\1的处理原则"),
+    (r"^(.*?)的标准$", r"\1的诊断标准"),
+    (r"^(.*?)的流程$", r"\1的流程是什么"),
+    (r"^(.*?)制度$", r"\1制度的内容"),
+    (r"^(.*?)报告$", r"\1报告的主要内容"),
+    (r"^(.*?)要求$", r"\1的要求有哪些"),
+    (r"^(.*?)规定$", r"\1的规定是什么"),
+    (r"^(.*?)区别$", r"\1的区别是什么"),
+    (r"^(.*?)如何(.*)$", r"\1怎么\2"),
+]
+
+
+def augment_synonyms(question, max_variants=3):
+    """Generate paraphrase variants of a question (conservative rules)."""
+    variants = []
+    for pat, repl in SYNONYM_RULES:
+        m = re.match(pat, question)
+        if m:
+            v = re.sub(pat, repl, question)
+            if v != question and 5 <= len(v) <= 100:
+                variants.append(v)
+            if len(variants) >= max_variants:
+                break
+    return variants
+
+
 def build_samples_from_messages(messages):
     """Convert a ChatML message list to (text, assistant_start) sample.
 
@@ -311,6 +357,8 @@ def main():
     ap = argparse.ArgumentParser(description="Build SFT dataset for Chinese ESP32 model")
     ap.add_argument("--skip-search-logs", action="store_true",
                     help="Only use WSL ChatML data, skip D:/docs/search_logs")
+    ap.add_argument("--augment", action="store_true",
+                    help="Add synonym-paraphrase variants of search_log questions")
     ap.add_argument("--val-fraction", type=float, default=0.10)
     args = ap.parse_args()
 
@@ -336,13 +384,23 @@ def main():
             if s:
                 s["source"] = "search_logs"
                 samples.append(s)
+            # Synonym variants
+            if args.augment:
+                for v in augment_synonyms(p["instruction"]):
+                    sv = build_samples_from_messages([
+                        {"role": "user", "content": v},
+                        {"role": "assistant", "content": p["response"]},
+                    ])
+                    if sv:
+                        sv["source"] = "search_logs_aug"
+                        samples.append(sv)
         # archive raw pairs
         with open(RAW_DIR / "search_logs_qa.json", "w", encoding="utf-8") as f:
             json.dump(kept, f, ensure_ascii=False, indent=2)
         print(f"  archived {len(kept)} cleaned search_log QA to raw/")
 
     print("\n=== Phase 0.3: WSL ChatML samples ===")
-    for name, tag in [("med_instruction_train_chatml.json", "wsl_train"),
+    for name, tag in [("med_instruction_chatml.json", "wsl_train"),
                       ("med_instruction_cot_chatml.json", "wsl_cot"),
                       ("med_instruction_val_chatml.json", "wsl_val")]:
         items = load_wsl_chatml(name)
@@ -354,6 +412,22 @@ def main():
                 samples.append(s)
                 n += 1
         print(f"  {name}: {len(items)} items -> {n} samples")
+
+    print("\n=== Phase 0.3b: local templates (Path C) ===")
+    templates_path = PROC_DIR / "templates.json"
+    if templates_path.exists():
+        tpl = json.load(open(templates_path, encoding="utf-8"))
+        n = 0
+        for t in tpl:
+            s = build_samples_from_messages([
+                {"role": "user", "content": t["question"]},
+                {"role": "assistant", "content": t["answer"]},
+            ])
+            if s:
+                s["source"] = "template"
+                samples.append(s)
+                n += 1
+        print(f"  templates: {len(tpl)} -> {n} samples")
 
     print(f"\nTotal samples: {len(samples)}")
     print(f"  by source: ", end="")
