@@ -258,7 +258,10 @@ def encode_sample(sample):
 
     input_ids = [BOS] + prefix_ids + answer_ids + [EOS]
     n_pref = len(prefix_ids) + 1  # + BOS
-    labels = [-100] * n_pref + answer_ids + [-100]  # loss only on answer
+    # label[i] must equal input_ids[i+1] (predict the NEXT token).
+    # Loss starts at n_pref-1 (the <assistant> marker predicts answer[0]).
+    labels = [-100] * (n_pref - 1) + answer_ids + [EOS] + [-100]
+    assert len(labels) == len(input_ids), f"{len(labels)} != {len(input_ids)}"
     return {"input_ids": input_ids, "labels": labels}
 
 

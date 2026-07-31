@@ -92,13 +92,13 @@ def main():
     # Data
     ap.add_argument("--vocab-size", type=int, default=None,
                     help="Override vocab size (auto-detected from tokenizer if omitted)")
-    # Architecture
+    # Architecture (larger model: 6.79M params, core 1.5M — fits ESP32-S3)
     ap.add_argument("--arm", default="ple", choices=["baseline", "ple", "ple_notable"])
-    ap.add_argument("--d-model", type=int, default=64)
-    ap.add_argument("--n-layers", type=int, default=4)
-    ap.add_argument("--n-heads", type=int, default=4)
-    ap.add_argument("--ple-dim", type=int, default=64)
-    ap.add_argument("--target-core", type=int, default=280000)
+    ap.add_argument("--d-model", type=int, default=128)
+    ap.add_argument("--n-layers", type=int, default=6)
+    ap.add_argument("--n-heads", type=int, default=8)
+    ap.add_argument("--ple-dim", type=int, default=128)
+    ap.add_argument("--target-core", type=int, default=1500000)
     # Training
     ap.add_argument("--steps", type=int, default=5000)
     ap.add_argument("--batch-size", type=int, default=16)
