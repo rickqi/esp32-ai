@@ -11,8 +11,12 @@ Token layout (0-3 fixed prefixes, real chars, then SFT markers appended):
   2 = <BOS>      begin of sequence
   3 = <EOS>      end of sequence
   4+             real characters sorted by frequency
-  (last 3)       <|user|>, <|assistant|>, <|end|>  — SFT markers appended
-                  AFTER chars so existing IDs/train.bin never shift
+  (last 3)       <user>, <assistant>, <end>  — SFT markers appended AFTER
+                  chars so existing IDs/train.bin never shift.
+
+  NOTE: markers deliberately contain NO '|' — '<|assistant|>' embeds the pipe
+  char which the model confused with its own tail, causing self-reinforcing
+  '|' loops at inference. Plain '<assistant>' avoids this.
 """
 
 import json
@@ -28,7 +32,7 @@ class CharTokenizer:
     BOS = 2
     EOS = 3
     SPECIAL = ["<PAD>", "<UNK>", "<BOS>", "<EOS>"]
-    EXTRA_SPECIAL = ["<|user|>", "<|assistant|>", "<|end|>"]
+    EXTRA_SPECIAL = ["<user>", "<assistant>", "<end>"]
 
     def __init__(self, vocab: Optional[dict] = None):
         self.stoi = vocab or {}          # char → id
@@ -38,9 +42,9 @@ class CharTokenizer:
 
     def _set_extra_ids(self):
         """USER/ASSIST/END ids are dynamic: whatever follows the chars."""
-        self.USER = self.stoi.get("<|user|>", -1)
-        self.ASSIST = self.stoi.get("<|assistant|>", -1)
-        self.END = self.stoi.get("<|end|>", -1)
+        self.USER = self.stoi.get("<user>", -1)
+        self.ASSIST = self.stoi.get("<assistant>", -1)
+        self.END = self.stoi.get("<end>", -1)
 
     def train(self, text: str, vocab_size: int = 8000, min_freq: int = 2):
         """Build character vocabulary from text, then append SFT markers."""

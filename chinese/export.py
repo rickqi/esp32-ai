@@ -31,11 +31,20 @@ MAGIC = 0x504C4531  # "PLE1"
 GROUP = 128
 
 
+def find_ckpt(tag):
+    """Check runs_chinese/ and runs_chinese/sft/ for the checkpoint."""
+    for base in (RUNS, RUNS / "sft"):
+        p = base / f"{tag}.pt"
+        if p.exists():
+            return p
+    return RUNS / f"{tag}.pt"
+
+
 def main():
     tag = sys.argv[1] if len(sys.argv) > 1 else "ple-zh-s42"
     os.makedirs(OUT, exist_ok=True)
 
-    ck_path = RUNS / f"{tag}.pt"
+    ck_path = find_ckpt(tag)
     if not ck_path.exists():
         print(f"Model not found: {ck_path}")
         sys.exit(1)

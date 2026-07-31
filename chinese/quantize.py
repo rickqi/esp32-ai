@@ -29,6 +29,15 @@ DATA = PROJECT_ROOT / "data_chinese"
 RUNS = PROJECT_ROOT / "runs_chinese"
 
 
+def find_ckpt(tag, seed):
+    """Check runs_chinese/ and runs_chinese/sft/ for the checkpoint."""
+    for base in (RUNS, RUNS / "sft"):
+        p = base / f"ple-{tag}-s{seed}.pt"
+        if p.exists():
+            return p
+    return RUNS / f"ple-{tag}-s{seed}.pt"
+
+
 def get_device():
     if torch.backends.mps.is_available():
         return "mps"
@@ -81,7 +90,7 @@ def main():
     args = ap.parse_args()
     device = get_device()
 
-    path = RUNS / f"ple-{args.tag}-s{args.seed}.pt"
+    path = find_ckpt(args.tag, args.seed)
     if not path.exists():
         print(f"Model not found: {path}")
         sys.exit(1)

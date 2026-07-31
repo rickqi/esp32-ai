@@ -1,4 +1,4 @@
-"""
+﻿"""
 SFT data builder for the Chinese ESP32 model — Phase 0 of the SFT plan.
 
 Fully isolated from the English pipeline. Builds the instruction-following
@@ -15,7 +15,7 @@ Output archive (gitignored, local):
   data_chinese/sft/split/      — plain-text train/val for anti-forgetting mix
 
 Special tokens (must match chinese/tokenizer.py after extension):
-  4 = <|user|>      5 = <|assistant|>      6 = <|end|>
+  4 = <user>      5 = <assistant>      6 = <end>
   (0=PAD 1=UNK 2=BOS 3=EOS already defined)
 
 Usage:
@@ -126,9 +126,37 @@ def is_list_only_response(text):
     return False
 
 
+# Tool-call / retrieval-routing residue from search_logs (not real answers)
+TOOL_RESIDUE = [
+    "<tool_call>", "<arg_key>", "<arg_value>", "doc_id",
+    "我需要读取", "让我先读取", "让我读取", "让我先搜索", "让我进行搜索",
+    "让我查看", "让我查一下", "正在读取文档", "为了回答该问题，我需要",
+    "为了回答这个问题，我需要", "为了获取相关文档",
+]
+# Negative / non-answer responses (RAG found nothing — teaches model to refuse)
+NEGATIVE_PATTERNS = [
+    "我没有找到", "无法找到", "未找到任何", "没有找到与",
+    "没有提及", "不包含任何", "没有包含", "不存在相关",
+    "无法回答", "无法提供", "没有检索到", "未检索到",
+    "我没有检索到", "没有在文档中", "未在文档中",
+]
+
+
+def is_low_quality_search_log(p):
+    """True if a search-log pair should be dropped (tool residue / negation)."""
+    resp = p["response"]
+    if any(patt in resp for patt in TOOL_RESIDUE):
+        return True
+    if any(patt in resp for patt in NEGATIVE_PATTERNS):
+        return True
+    return False
+
+
 def clean_search_logs(pairs):
     """Filter low-quality search-log QA pairs."""
     kept = []
+    dropped_tool = 0
+    dropped_neg = 0
     for p in pairs:
         inst = p["instruction"].strip()
         resp = p["response"].strip()
@@ -145,8 +173,15 @@ def clean_search_logs(pairs):
             continue
         if not re.search(r"[\u4e00-\u9fff]", resp):
             continue
+        if is_low_quality_search_log(p):
+            if any(t in resp for t in TOOL_RESIDUE):
+                dropped_tool += 1
+            else:
+                dropped_neg += 1
+            continue
         kept.append(p)
-    print(f"  cleaned: {len(pairs)} -> {len(kept)} search_log QA pairs")
+    print(f"  cleaned: {len(pairs)} -> {len(kept)} "
+          f"(dropped tool-residue={dropped_tool}, negative={dropped_neg})")
     return kept
 
 
@@ -157,7 +192,7 @@ def clean_search_logs(pairs):
 def build_samples_from_messages(messages):
     """Convert a ChatML message list to (text, assistant_start) sample.
 
-    text = "<|user|> QUESTION <|end|><|assistant|> ANSWER <|end|>"
+    text = "<user> QUESTION <end><assistant> ANSWER <end>"
     Returns None if no user/assistant pair.
     """
     user_parts = []
@@ -176,7 +211,7 @@ def build_samples_from_messages(messages):
     if len(question) < MIN_INSTRUCTION_CHARS or len(answer) < MIN_RESPONSE_CHARS:
         return None
     return {
-        "text": f"<|user|>{question}<|end|><|assistant|>{answer}<|end|>",
+        "text": f"<user>{question}<end><assistant>{answer}<end>",
         "question": question,
         "answer": answer,
         "question_len": len(question),
@@ -193,8 +228,8 @@ def encode_sample(sample):
         print("  [error] tokenizer.json has no SFT markers; run migrate step")
         return None
     text = sample["text"]
-    # Split at <|assistant|> to find the loss region
-    marker = "<|assistant|>"
+    # Split at <assistant> to find the loss region
+    marker = "<assistant>"
     marker_idx = text.find(marker)
     if marker_idx < 0:
         return None
@@ -206,12 +241,12 @@ def encode_sample(sample):
         ids = []
         i = 0
         while i < len(segment):
-            if segment.startswith("<|user|>", i):
-                ids.append(tok_user); i += len("<|user|>")
-            elif segment.startswith("<|assistant|>", i):
-                ids.append(tok_assist); i += len("<|assistant|>")
-            elif segment.startswith("<|end|>", i):
-                ids.append(tok_end); i += len("<|end|>")
+            if segment.startswith("<user>", i):
+                ids.append(tok_user); i += len("<user>")
+            elif segment.startswith("<assistant>", i):
+                ids.append(tok_assist); i += len("<assistant>")
+            elif segment.startswith("<end>", i):
+                ids.append(tok_end); i += len("<end>")
             else:
                 ch = segment[i]
                 ids.append(tok.stoi.get(ch, UNK))
@@ -228,10 +263,13 @@ def encode_sample(sample):
 
 
 def ensure_tokenizer_sft():
-    """Migrate tokenizer.json: append the 3 SFT markers if absent.
+    """Migrate tokenizer.json: ensure the 3 SFT markers are present.
 
-    Appending keeps existing char ids / train.bin / val.bin unchanged — only
-    the model head needs 3 extra rows at SFT time (handled in sft_train.py).
+    Old builds used '<|user|>' etc. which embed '|' and cause self-reinforcing
+    pipe loops at inference. If legacy markers are found they are replaced by
+    '<user>' / '<assistant>' / '<end>'. Because markers live at the END of the
+    vocab, char ids / train.bin / val.bin stay unchanged — only the model head
+    needs 3 extra rows at SFT time (handled in sft_train.py).
     """
     from chinese.tokenizer import CharTokenizer
     tok_path = PROJECT_ROOT / "data_chinese" / "tokenizer.json"
@@ -239,19 +277,26 @@ def ensure_tokenizer_sft():
         print(f"  [error] tokenizer.json missing: {tok_path}")
         sys.exit(1)
     tok = CharTokenizer.load(str(tok_path))
-    if tok.USER >= 0:
+
+    # Drop legacy pipe-markers if present
+    legacy = ["<|user|>", "<|assistant|>", "<|end|>"]
+    for m in legacy:
+        if m in tok.stoi:
+            del tok.stoi[m]
+            print(f"  removed legacy marker: {m}")
+
+    if all(tok.stoi.get(s, -1) < 0 for s in CharTokenizer.EXTRA_SPECIAL):
+        for s in CharTokenizer.EXTRA_SPECIAL:
+            tok.stoi[s] = len(tok.stoi)
+        tok.itos = {v: k for k, v in tok.stoi.items()}
+        tok.vocab_size = len(tok.stoi)
+        tok._set_extra_ids()
+        tok.save(str(tok_path))
+        print(f"  migrated tokenizer: vocab {tok.vocab_size - 3} -> {tok.vocab_size} "
+              f"(user={tok.USER}, assist={tok.ASSIST}, end={tok.END})")
+    else:
         print(f"  tokenizer already has SFT markers (user={tok.USER}, "
               f"assist={tok.ASSIST}, end={tok.END}), vocab={tok.vocab_size}")
-        return tok
-    # Append markers at the end
-    for s in CharTokenizer.EXTRA_SPECIAL:
-        tok.stoi[s] = len(tok.stoi)
-    tok.itos = {v: k for k, v in tok.stoi.items()}
-    tok.vocab_size = len(tok.stoi)
-    tok._set_extra_ids()
-    tok.save(str(tok_path))
-    print(f"  migrated tokenizer: vocab {tok.vocab_size - 3} -> {tok.vocab_size} "
-          f"(user={tok.USER}, assist={tok.ASSIST}, end={tok.END})")
     return tok
 
 
