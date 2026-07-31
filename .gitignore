@@ -17,6 +17,14 @@ firmware/model/golden.npz
 firmware/model/golden.txt
 firmware/esp32_llm/vocab.h
 
+# chinese pipeline generated data + runs (regenerate with chinese/*.py)
+data_chinese/*.bin
+data_chinese/*.txt
+data_chinese/*.json
+runs_chinese/
+firmware/model_chinese/
+chinese/__pycache__/
+
 # raw video / recordings (demo footage — keep out of the repo)
 video/
 videos/
