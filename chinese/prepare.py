@@ -107,6 +107,23 @@ def clean_markdown(text: str) -> str:
         # Python stdout captured in logs
         if re.match(r"^(Processing|Process finished)", s):
             continue
+
+        # ---- low-quality table/data-dump lines ----
+        n = len(s)
+        # Digit-heavy rows (data exports / ICD code lists)
+        digit_ratio = sum(c.isdigit() for c in s) / max(n, 1)
+        if digit_ratio > 0.35:
+            continue
+        # Pipe-separated table rows
+        if s.count("|") >= 3:
+            continue
+        # Long space-separated code/number runs (e.g. "120 124 221 116 623 160 322 .000000")
+        if re.match(r"^[\d\s.+\-]+$", s) and n > 20:
+            continue
+        # DLP-style audit rows: contains both "|" and file extensions
+        if "\\" in s and s.count("/") + s.count("\\") >= 2:
+            continue
+
         clean_lines.append(s)
 
     text = "\n".join(clean_lines)
@@ -115,11 +132,19 @@ def clean_markdown(text: str) -> str:
     return text.strip()
 
 
-def _scan_files(source_dir: Path, min_file_bytes: int = 500, min_chinese: int = 20):
-    """First pass: rank all .md/.txt files by Chinese character count (desc)."""
+def _scan_files(source_dir: Path, min_file_bytes: int = 500, min_chinese: int = 20,
+                exclude_dirs: tuple = ("DLP", "DLP案件反馈")):
+    """First pass: rank all .md/.txt files by Chinese character count (desc).
+
+    Files under any excluded directory name are skipped (DLP data dumps are
+    table-heavy and pollute language-model training).
+    """
     stats = []
     for fpath in source_dir.rglob("*"):
         if fpath.suffix.lower() not in (".md", ".txt"):
+            continue
+        # Skip files inside excluded directories
+        if any(ex in fpath.parts for ex in exclude_dirs):
             continue
         try:
             if fpath.stat().st_size < min_file_bytes:
@@ -141,7 +166,8 @@ def _scan_files(source_dir: Path, min_file_bytes: int = 500, min_chinese: int = 
 
 
 def extract_text(source_dir: str, out_path: Path, min_file_bytes: int = 500,
-                 max_chars: int = 100_000_000, max_per_file: int = 2_000_000):
+                 max_chars: int = 100_000_000, max_per_file: int = 2_000_000,
+                 exclude_dirs: tuple = ("DLP", "DLP案件反馈")):
     """Walk source dir, clean each .md/.txt, write to out_path, stop at cap.
 
     Files are processed in order of Chinese content (richest first) so the
@@ -156,12 +182,13 @@ def extract_text(source_dir: str, out_path: Path, min_file_bytes: int = 500,
         sys.exit(1)
 
     print("  scanning files by Chinese content...")
-    ranked = _scan_files(source, min_file_bytes)
+    ranked = _scan_files(source, min_file_bytes, exclude_dirs=exclude_dirs)
     print(f"  found {len(ranked)} files with Chinese content")
 
     total = 0
     chinese_total = 0
     files_used = 0
+    skipped_bad = 0
 
     with open(out_path, "w", encoding="utf-8") as wf:
         for zh, fpath in ranked:
@@ -171,7 +198,13 @@ def extract_text(source_dir: str, out_path: Path, min_file_bytes: int = 500,
                 raw = Path(fpath).read_text(encoding="utf-8", errors="replace")
             except Exception:
                 continue
-            cleaned = clean_markdown(raw)
+            try:
+                cleaned = clean_markdown(raw)
+            except Exception as exc:
+                skipped_bad += 1
+                if skipped_bad <= 5:
+                    print(f"  [warn] clean failed: {Path(fpath).name}: {exc}", flush=True)
+                continue
             chinese_chars = count_chinese(cleaned)
             if chinese_chars < 20:
                 continue
@@ -188,6 +221,8 @@ def extract_text(source_dir: str, out_path: Path, min_file_bytes: int = 500,
             total += len(piece)
             chinese_total += count_chinese(piece)  # count what was actually written
             files_used += 1
+            if files_used % 10 == 0:
+                print(f"  {files_used} files, {total/1e6:.0f}M chars", flush=True)
 
     print(f"Extracted: {files_used} files, "
           f"{total:,} chars total, "
@@ -213,6 +248,8 @@ def main():
                     help="Cap corpus size (default 100M chars; 0 = no cap)")
     ap.add_argument("--max-per-file", type=int, default=2_000_000,
                     help="Per-file char cap so no single file dominates (0 = no cap)")
+    ap.add_argument("--exclude-dirs", default="DLP,DLP案件反馈",
+                    help="Comma-separated directory names to skip (default excludes DLP data dumps)")
     ap.add_argument("--out-dir", default=None,
                     help="Output directory (default: data_chinese/)")
     args = ap.parse_args()
@@ -223,9 +260,10 @@ def main():
     # Step 1: Extract & clean text (streamed to disk, capped)
     print("=== Step 1: Extract text ===")
     raw_path = out_dir / "corpus.txt"
+    exclude = tuple(d.strip() for d in args.exclude_dirs.split(",") if d.strip())
     total_chars, chinese_total, files_used = extract_text(
         args.source, raw_path, max_chars=args.max_chars or 10**12,
-        max_per_file=args.max_per_file)
+        max_per_file=args.max_per_file, exclude_dirs=exclude)
 
     if total_chars < 1000:
         print(f"Corpus too small ({total_chars} chars). Check source directory.")
