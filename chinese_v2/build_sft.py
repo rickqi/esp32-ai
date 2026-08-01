@@ -1,13 +1,16 @@
 """
-chinese_v2 SFT data builder — sample zjydiary finetune instructions.
+chinese_v2 SFT data builder — multi-source merge.
 
-Samples N entries from finetune/train_zh_0.json (1.95M medical instruction
-pairs) and encodes them into the sft_train.py format with shifted loss
-labels (only assistant/answer tokens count).
+Merges three instruction sources into the v2 SFT pool:
+  A. zjydiary finetune     (1.95M medical QA, JSONL instruction/output)
+  B. BenTsao 本草           (8.6K structured medical QA, JSONL)
+  C. HuatuoGPT2-SFT-GPT4   (142K multi-turn, JSON array human/gpt)
+
+Sampling is stratified so no single source dominates; output has shifted
+loss labels (only assistant/answer tokens count).
 
 Usage:
-    uv run python chinese_v2/build_sft.py --count 30000
-    uv run python chinese_v2/build_sft.py --count 30000 --val-count 3000
+    uv run python chinese_v2/build_sft.py --zjydiary 30000 --benchao 8000 --huatuogpt2 20000
 """
 
 import argparse
@@ -20,13 +23,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from chinese.tokenizer import CharTokenizer  # noqa: E402
 
 DATA_DIR = Path("/mnt/d/codes/esp32-ai/data_v2")
-FINETUNE = DATA_DIR / "raw" / "zjydiary_Medical" / "finetune" / "train_zh_0.json"
+RAW = DATA_DIR / "raw"
 OUT_DIR = DATA_DIR / "sft"
 PAD, UNK, BOS, EOS = 0, 1, 2, 3
 
 
 def encode_instruction(tok, question, answer):
-    """Encode into [BOS user Q end assist A end EOS] with shifted labels."""
     tok_user, tok_assist, tok_end = tok.USER, tok.ASSIST, tok.END
 
     def ids_of(text):
@@ -52,43 +54,98 @@ def encode_instruction(tok, question, answer):
     return input_ids, labels
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--count", type=int, default=30000)
-    ap.add_argument("--val-count", type=int, default=3000)
-    ap.add_argument("--seed", type=int, default=42)
-    args = ap.parse_args()
-
-    tok = CharTokenizer.load(str(DATA_DIR / "tokenizer.json"))
-    print(f"tokenizer: {tok.vocab_size} (user={tok.USER})")
-
-    # Sample lines from finetune jsonl
-    rng = random.Random(args.seed)
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-
-    samples = []
-    with open(FINETUNE, encoding="utf-8", errors="replace") as f:
+def load_zjydiary(sample_n, rng):
+    """JSONL instruction/output."""
+    out = []
+    p = RAW / "zjydiary_Medical" / "finetune" / "train_zh_0.json"
+    with open(p, encoding="utf-8", errors="replace") as f:
         for line in f:
-            line = line.strip()
-            if not line:
-                continue
             try:
                 d = json.loads(line)
             except json.JSONDecodeError:
                 continue
             q = (d.get("instruction", "") or "").strip()
             a = (d.get("output", "") or "").strip()
-            if len(q) < 5 or len(a) < 30:
-                continue
-            samples.append((q, a))
-            if len(samples) >= args.count * 2:
-                break
+            if len(q) >= 5 and len(a) >= 30:
+                out.append((q, a))
+    rng.shuffle(out)
+    print(f"zjydiary: collected {len(out)}, sample {sample_n}")
+    return out[:sample_n]
 
-    print(f"collected {len(samples)} valid samples, sampling...")
-    rng.shuffle(samples)
-    picked = samples[:args.count + args.val_count]
-    val = picked[:args.val_count]
-    train = picked[args.val_count:]
+
+def load_benchao(sample_n, rng):
+    """JSONL instruction/output (BenTsao 本草)."""
+    out = []
+    p = RAW / "benchao" / "llama_data.json"
+    if not p.exists():
+        print("benchao missing, skip")
+        return []
+    with open(p, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            try:
+                d = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            q = (d.get("instruction", "") or "").strip()
+            a = (d.get("output", "") or "").strip()
+            if len(q) >= 5 and len(a) >= 30:
+                out.append((q, a))
+    rng.shuffle(out)
+    print(f"benchao: collected {len(out)}, sample {sample_n}")
+    return out[:sample_n]
+
+
+def load_huatuogpt2(sample_n, rng):
+    """JSON array {conversations: [{from: human/gpt, value}]}."""
+    out = []
+    p = RAW / "huatuogpt2" / "HuatuoGPT2-GPT4-SFT-140K.json"
+    if not p.exists():
+        print("huatuogpt2 missing, skip")
+        return []
+    d = json.load(open(p, encoding="utf-8"))
+    for item in d:
+        convs = item.get("conversations", [])
+        turns = []
+        for c in convs:
+            f = c.get("from", "")
+            v = c.get("value", "")
+            if isinstance(v, list):
+                v = "\n".join(str(x) for x in v)
+            v = str(v or "").strip()
+            if v:
+                turns.append((f, v))
+        human = next((v for f, v in turns if f == "human"), "")
+        gpt = next((v for f, v in turns if f in ("gpt", "assistant")), "")
+        if len(human) >= 5 and len(gpt) >= 30:
+            out.append((human, gpt))
+    rng.shuffle(out)
+    print(f"huatuogpt2: collected {len(out)}, sample {sample_n}")
+    return out[:sample_n]
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--zjydiary", type=int, default=30000)
+    ap.add_argument("--benchao", type=int, default=8000)
+    ap.add_argument("--huatuogpt2", type=int, default=20000)
+    ap.add_argument("--val-count", type=int, default=4000)
+    ap.add_argument("--seed", type=int, default=42)
+    args = ap.parse_args()
+
+    tok = CharTokenizer.load(str(DATA_DIR / "tokenizer.json"))
+    print(f"tokenizer: {tok.vocab_size} (user={tok.USER})\n")
+    rng = random.Random(args.seed)
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    all_samples = []
+    all_samples += load_zjydiary(args.zjydiary, rng)
+    all_samples += load_benchao(args.benchao, rng)
+    all_samples += load_huatuogpt2(args.huatuogpt2, rng)
+    print(f"\ntotal: {len(all_samples)}")
+
+    rng.shuffle(all_samples)
+    val = all_samples[:args.val_count]
+    train = all_samples[args.val_count:]
 
     def encode_list(items):
         enc = []
@@ -108,7 +165,6 @@ def main():
         json.dump({"data": val_enc, "format": "char-level"}, f, ensure_ascii=False)
 
     print(f"train: {len(train_enc)}, val: {len(val_enc)} -> {OUT_DIR}")
-    # sample check
     s = train_enc[0]
     print(f"  sample: len={len(s['input_ids'])}, loss_positions="
           f"{sum(1 for v in s['labels'] if v != -100)}")
