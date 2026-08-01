@@ -35,6 +35,18 @@
 - ✅ **防御性修复**: export.py/quantize.py 增加 NaN/Inf 清零；verify.c probe 越界修复
 - 提交: (本批次) (feat: RLCD CJK display (7854 glyphs) + v2 firmware + fix v2 NaN root cause (group param))
 
+### 2026-08-01: 设备端显示打磨 + 默认提示词医疗化
+- 🔧 **prompt 区去除 SFT 标记**: display_draw_prompt_2x 不再渲染 `<BOS>`/`<user>`/
+  `<end>`/`<assistant>` 字面文本，只显示真实用户问题（v1/v2 词表自适应）
+- 🔧 **屏蔽生成期 BOS token**: 模型不再在生成中输出 `<BOS>`(id 2)标记文本，
+  与 `<user>`/`<assistant>` 同样屏蔽（v1/v2）
+- 🔧 **footer 显示实际模型**: 底部状态栏按 VOCAB_N 显示 v1=12.5M / v2=13.7M，
+  替换原英文模型硬编码 "28.9M"
+- 🔧 **默认提示词医疗化**: DEMO_PROMPT_IDS "本报告" → **"糖尿病二型"**
+  （v2: [269,88,11,358,204]，v1: [716,407,31,132,267]）
+- ✅ 端侧实测: "感冒如何治疗"/"甲状腺结节切除"生成通顺中文，无标记泄漏无光标残留
+- 提交: `19d1bb6` `453786d` `335eff7` `cedc2b2`
+
 ### 2026-08-01: 部署验证 + NaN 防护
 - ✅ model.bin 7.10MB / PSRAM 3.73MB / vocab 6,594 全部通过部署检查
 - ✅ 权重与导出产物 NaN/Inf 清零验证（0/86 tensors）
