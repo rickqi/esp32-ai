@@ -24,6 +24,7 @@ data_chinese/*.json
 data_chinese/sft/
 runs_chinese/
 firmware/model_chinese/
+firmware/esp32_llm_zh/vocab.h
 chinese/__pycache__/
 
 # raw video / recordings (demo footage — keep out of the repo)
