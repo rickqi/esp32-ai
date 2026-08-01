@@ -84,19 +84,21 @@ def build_corpus(max_chars=MAX_CHARS):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     all_texts = []
-    # Scan downloaded data dir for json files
-    src = RAW_DIR / "zjydiary_Medical"
+    # Scan ONLY the pretrain dir (encyclopedia + textbooks) for pretraining corpus
+    src = RAW_DIR / "zjydiary_Medical" / "pretrain"
     if not src.exists():
         print(f"data not downloaded: {src}\n  run: uv run python chinese_v2/prepare.py --download")
         sys.exit(1)
 
     n_json = 0
     for f in src.rglob("*.json"):
+        if "test" in f.name or "valid" in f.name:
+            continue  # skip test/valid splits
         n_json += 1
         texts = extract_json_text(f, "text")
         all_texts.extend(texts)
-        print(f"  {f.relative_to(src)}: {len(texts)} entries")
-    print(f"total json files: {n_json}, text entries: {len(all_texts)}")
+        print(f"  {f.name}: {len(texts)} entries")
+    print(f"pretrain json files: {n_json}, text entries: {len(all_texts)}")
 
     # Write capped corpus
     total = 0
