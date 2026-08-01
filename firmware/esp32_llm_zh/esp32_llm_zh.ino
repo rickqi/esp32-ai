@@ -19,6 +19,48 @@
 #include "../common/llm.h"
 #include "vocab.h"
 
+// ---- SD card logging (Waveshare RLCD-4.2: SDMMC, CLK=38 CMD=21 D0=39) ------
+// Writes every generation (prompt + output) as UTF-8 to /sdcard/logs/llm.log,
+// so Chinese output is readable from the SD card even when the serial terminal
+// shows mojibake. Uses ESP-IDF sdmmc+fatfs (matches the reference wifi_sta BSP).
+#include "esp_vfs_fat.h"
+#include "sdmmc_cmd.h"
+#include "driver/sdmmc_host.h"
+#include <sys/stat.h>
+
+static sdmmc_card_t *sd_card = NULL;
+static bool sd_ok = false;
+static FILE *sd_logfp = NULL;
+
+static void sd_init() {
+  sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+  sdmmc_slot_config_t slot = SDMMC_SLOT_CONFIG_DEFAULT();
+  slot.width = 1;
+  slot.clk = GPIO_NUM_38; slot.cmd = GPIO_NUM_21; slot.d0 = GPIO_NUM_39;
+  esp_vfs_fat_sdmmc_mount_config_t mount = {};
+  mount.format_if_mount_failed = false;
+  mount.max_files = 5;
+  esp_err_t err = esp_vfs_fat_sdmmc_mount("/sdcard", &host, &slot, &mount, &sd_card);
+  sd_ok = (err == ESP_OK);
+  if (sd_ok) {
+    struct stat st;
+    if (stat("/sdcard/logs", &st) != 0) mkdir("/sdcard/logs", 0777);
+    Serial.println("SD: mounted /sdcard/logs");
+  } else {
+    Serial.println("SD: mount failed (no card?)");
+  }
+}
+
+static void sd_log_open(const char *meta) {
+  if (!sd_ok) return;
+  sd_logfp = fopen("/sdcard/logs/llm.log", "a");
+  if (sd_logfp) { fprintf(sd_logfp, "\n=== %s ===\n", meta); }
+}
+
+static void sd_log_close() {
+  if (sd_logfp) { fclose(sd_logfp); sd_logfp = NULL; }
+}
+
 // Set to 1 once a display panel is wired up -- see display.h.
 // Leave 0 to run serial-only (no panel needed).
 #define USE_DISPLAY 1
@@ -128,6 +170,7 @@ static void emit(int tok) {
 #if USE_DISPLAY
   if (!display_suppress) display_puts(bytes, len);
 #endif
+  if (sd_logfp) fwrite(bytes, 1, len, sd_logfp);  // UTF-8 log to SD card
 }
 
 #if USE_DISPLAY && DISPLAY_KIND == DISPLAY_RLCD_ST7305
@@ -340,6 +383,7 @@ static int sample_token(float *logits, int n, float temp, int topk, uint32_t *rn
 // Run the full generate loop using the last received prompt (recv_ids/recv_n).
 // Writes tokens to serial (raw text) and display, then emits a JSON done signal.
 static void run_generation() {
+  sd_log_open("generation");   // open UTF-8 log on SD (prompt+output via emit)
 #if USE_DISPLAY
   display_home();
 #endif
@@ -427,6 +471,7 @@ static void run_generation() {
   // JSON completion marker: the PC script recognises this as end-of-stream.
   Serial.printf("{\"done\":true,\"tok/s\":%.2f}\n", decoded * 1e6f / total_us);
   blink(0);
+  sd_log_close();   // flush generation to SD card log
 }
 
 // ---- PCF85063 RTC (Waveshare RLCD-4.2 onboard, I2C: SDA=13, SCL=14) --------
@@ -485,7 +530,8 @@ void setup() {
   Serial.println("\n=== ESP32-S3 PLE TinyLM ===");
   init_pcf85063();  // try PCF85063 RTC 鈫?settimeofday() for real date/time
   init_adc();       // battery ADC (GPIO4, 3x divider)
-  init_wifi();      // WiFi STA (rickqi11) 鈥?async connect
+  init_wifi();      // WiFi STA (rickqi11)
+  sd_init();        // SD card → /sdcard/logs/ for UTF-8 generation logs 鈥?async connect
   // Read battery once; WiFi will connect in background
 
   // Map the model partition.
