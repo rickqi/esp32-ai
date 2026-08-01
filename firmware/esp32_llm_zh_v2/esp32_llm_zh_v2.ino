@@ -420,12 +420,20 @@ static void run_generation() {
   read_shtc3(&shtc3_temp, &shtc3_humi);  // refresh SHTC3
   display_draw_header(wifi_status, bat_pct, shtc3_temp, shtc3_humi);
   display_draw_hline(DIV1_Y);
-  // Prompt in 2x: decode recv_ids to bytes, render "> " + prompt
+  // Prompt in 2x: decode recv_ids to bytes, render "> " + prompt.
+  // Skip SFT structural tokens (BOS/<user>/<end>/<assistant>) so the display
+  // shows only the real user question, not the marker text.  Token ids are
+  // vocab-dependent: v1 (5904) markers at 2/5901/5902/5903, v2 (6594) at
+  // 2/6591/6592/6593.
   char prompt_buf[160];
   int plen = 0;
   for (int i = 0; i < recv_n && plen < (int)sizeof(prompt_buf) - 1; i++) {
     int t = recv_ids[i];
     if (t < 0 || t >= VOCAB_N) continue;
+    if (t == 2) continue;                                       // <BOS>
+    if (t == (VOCAB_N == 6594 ? 6591 : 5901)) continue;         // <user>
+    if (t == (VOCAB_N == 6594 ? 6592 : 5902)) continue;         // <assistant>
+    if (t == (VOCAB_N == 6594 ? 6593 : 5903)) continue;         // <end>
     int tlen = VOCAB_OFF[t + 1] - VOCAB_OFF[t];
     for (int j = 0; j < tlen && plen < (int)sizeof(prompt_buf) - 1; j++)
       prompt_buf[plen++] = (char)VOCAB_BLOB[VOCAB_OFF[t] + j];
