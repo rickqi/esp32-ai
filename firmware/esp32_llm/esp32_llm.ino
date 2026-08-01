@@ -200,14 +200,17 @@ Scratch s;
 // The head is scanned in full every token and dominates runtime. We stage it as
 // int8 in PSRAM at boot (int4 nibbles unpacked ONCE), so per token there is no
 // nibble unpacking and no float conversion of weights -- just int8 x int8 ->
-// int32 dot per row. Its input dim (D=96) is a single group, so one scale per
-// row. int8-activation quality was validated on host (val perplexity delta ~0,
+// int32 dot per row. Its input dim is a single group, so one scale per row.
+// int8-activation quality was validated on host (val perplexity delta ~0,
 // see firmware/host_verify/ppl.c). Output rows split across both LX7 cores.
 static int8_t *head_w8 = NULL;      // [rows * cols] unpacked int8 weights (-7..7)
 static float  *head_scale8 = NULL;  // [rows] per-row dequant scale
 static int head_rows, head_cols;
 
-static int8_t head_actq[128];       // quantized activation, shared by both cores
+// Quantized activation buffer, shared by both cores. Sized for the largest
+// model dim supported (English D=96, Chinese D=160). Must be >= head_cols.
+#define HEAD_ACT_MAX 256
+static int8_t head_actq[HEAD_ACT_MAX];  // was 128 — overflowed on Chinese D=160
 static float  head_acts;            // its scale
 
 // int8 dot -> int32. Tight and branch-free so the S3 int SIMD / -O3 unrolls it.
@@ -306,6 +309,45 @@ static int parse_json_prompt(const char *json, int *ids, int *n, int *max) {
 }
 
 // ---- prompt-driven generation ------------------------------------------------
+// Sampling: temperature + top-k. Small models (esp. Chinese zh) loop on EOS with
+// greedy argmax; sampling lets them escape the EOS attractor and produce varied
+// text. Matches the host-side generate.py parameters (temp 0.8, top-k 40).
+#define SAMPLING_TEMP  0.8f
+#define SAMPLING_TOPK  40
+static uint32_t rng_state = 42;
+static uint32_t xrng() {  // xorshift32
+  rng_state ^= rng_state << 13; rng_state ^= rng_state >> 17; rng_state ^= rng_state << 5;
+  return rng_state;
+}
+// Sample next token from logits[n]. Mutates logits in place. If topk<=0 or n<=1, greedy.
+static int sample_token(float *logits, int n, float temp, int topk, uint32_t *rng) {
+  if (n <= 1) return 0;
+  if (topk > 0 && topk < n) {
+    // find k-th largest threshold via a small static buffer (no per-token alloc)
+    static float topk_buf[64];   // must be >= topk (SAMPLING_TOPK=40)
+    int cnt = 0;
+    for (int i = 0; i < n; i++) {
+      if (cnt < topk) { topk_buf[cnt++] = logits[i]; continue; }
+      int mi = 0; for (int j = 1; j < topk; j++) if (topk_buf[j] < topk_buf[mi]) mi = j;
+      if (logits[i] > topk_buf[mi]) topk_buf[mi] = logits[i];
+    }
+    float thr = 1e30f;
+    for (int j = 0; j < topk; j++) if (topk_buf[j] < thr) thr = topk_buf[j];
+    for (int i = 0; i < n; i++) if (logits[i] < thr) logits[i] = -1e30f;
+  }
+  if (temp > 0) for (int i = 0; i < n; i++) logits[i] /= temp;
+  float mx = -1e30f, sum = 0;
+  for (int i = 0; i < n; i++) if (logits[i] > mx) mx = logits[i];
+  for (int i = 0; i < n; i++) { logits[i] = expf(logits[i] - mx); sum += logits[i]; }
+  if (!(sum > 0)) { for (int i = 0; i < n; i++) if (logits[i] >= mx) return i; return 0; }
+  float r = (float)(xrng() % 100000) / 100000.0f * sum;
+  float c = 0;
+  for (int i = 0; i < n; i++) { c += logits[i]; if (c > r) return i; }
+  for (int i = n - 1; i >= 0; i--) if (logits[i] >= mx) return i;
+  return 0;
+}
+
+// Run the full generate loop using the last received prompt (recv_ids/recv_n).
 // Run the full generate loop using the last received prompt (recv_ids/recv_n).
 // Writes tokens to serial (raw text) and display, then emits a JSON done signal.
 static void run_generation() {
@@ -356,11 +398,8 @@ static void run_generation() {
   int64_t t_start = esp_timer_get_time();
 
   for (int step = 0; step < recv_max && pos < model.c.seq_len; step++) {
-    // greedy: argmax over the trained vocab
-    int best = 0; float bv = -1e30f;
-    for (int v = 0; v < VOCAB_N; v++)
-      if (s.logits[v] > bv) { bv = s.logits[v]; best = v; }
-    tok = best;
+    // temperature + top-k sampling (fixes EOS loop on small/Chinese models)
+    tok = sample_token(s.logits, VOCAB_N, SAMPLING_TEMP, SAMPLING_TOPK, &rng_state);
     emit(tok);
 #if USE_DISPLAY && DISPLAY_KIND == DISPLAY_RLCD_ST7305
     display_draw_cursor();   // show live generation position

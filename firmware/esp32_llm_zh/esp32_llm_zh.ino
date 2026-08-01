@@ -1,4 +1,4 @@
-// PLE TinyLM inference on the ESP32-S3 — 中文版 (zh4-ds).
+﻿// PLE TinyLM inference on the ESP32-S3 鈥?涓枃鐗?(zh4-ds).
 // The 12.5M-param Chinese model (6.49MB, 4-bit) lives in a flash 'model'
 // partition, memory-mapped so the PLE table is read a row at a time from
 // flash; the tied head plus scratch and KV cache sit in PSRAM. Same llm.h
@@ -81,7 +81,7 @@ static bool read_shtc3(float *t, float *h) {
   return true;
 }
 
-// Initialize WiFi station — connects asynchronously to rickqi11.
+// Initialize WiFi station 鈥?connects asynchronously to rickqi11.
 // Uses Arduino WiFi library (compatible with Arduino-ESP32 core).
 static void init_wifi() {
   WiFi.mode(WIFI_STA);
@@ -103,7 +103,7 @@ static float read_battery() {
 
 // ---- serial prompt ----------------------------------------------------------
 // Default demo prompt used when PROMPT_TIMEOUT_MS expires.
-static const int DEMO_PROMPT_IDS[] = {54, 255, 363};  // "本报告"
+static const int DEMO_PROMPT_IDS[] = {54, 255, 363};  // "鏈姤鍛?
 static const int DEMO_N_GENERATE = 200;
 
 // Emit one token to every active output (serial always; TFT when enabled).
@@ -194,7 +194,7 @@ static int8_t *head_w8 = NULL;      // [rows * cols] unpacked int8 weights (-7..
 static float  *head_scale8 = NULL;  // [rows] per-row dequant scale
 static int head_rows, head_cols;
 
-static int8_t head_actq[128];       // quantized activation, shared by both cores
+static int8_t head_actq[256];  // was 128 - Chinese D=160 overflow       // quantized activation, shared by both cores
 static float  head_acts;            // its scale
 
 // int8 dot -> int32. Tight and branch-free so the S3 int SIMD / -O3 unrolls it.
@@ -293,6 +293,40 @@ static int parse_json_prompt(const char *json, int *ids, int *n, int *max) {
 }
 
 // ---- prompt-driven generation ------------------------------------------------
+// Sampling: temperature + top-k. Greedy argmax makes the small Chinese model loop
+// on EOS; sampling escapes the attractor and produces varied text.
+#define SAMPLING_TEMP  0.8f
+#define SAMPLING_TOPK  40
+static uint32_t rng_state = 42;
+static uint32_t xrng() {
+  rng_state ^= rng_state << 13; rng_state ^= rng_state >> 17; rng_state ^= rng_state << 5;
+  return rng_state;
+}
+static int sample_token(float *logits, int n, float temp, int topk, uint32_t *rng) {
+  if (n <= 1) return 0;
+  if (topk > 0 && topk < n) {
+    static float topk_buf[64];
+    int cnt = 0;
+    for (int i = 0; i < n; i++) {
+      if (cnt < topk) { topk_buf[cnt++] = logits[i]; continue; }
+      int mi = 0; for (int j = 1; j < topk; j++) if (topk_buf[j] < topk_buf[mi]) mi = j;
+      if (logits[i] > topk_buf[mi]) topk_buf[mi] = logits[i];
+    }
+    float thr = 1e30f;
+    for (int j = 0; j < topk; j++) if (topk_buf[j] < thr) thr = topk_buf[j];
+    for (int i = 0; i < n; i++) if (logits[i] < thr) logits[i] = -1e30f;
+  }
+  if (temp > 0) for (int i = 0; i < n; i++) logits[i] /= temp;
+  float mx = -1e30f, sum = 0;
+  for (int i = 0; i < n; i++) if (logits[i] > mx) mx = logits[i];
+  for (int i = 0; i < n; i++) { logits[i] = expf(logits[i] - mx); sum += logits[i]; }
+  if (!(sum > 0)) { for (int i = 0; i < n; i++) if (logits[i] >= mx) return i; return 0; }
+  float r = (float)(xrng() % 100000) / 100000.0f * sum;
+  float c = 0;
+  for (int i = 0; i < n; i++) { c += logits[i]; if (c > r) return i; }
+  for (int i = n - 1; i >= 0; i--) if (logits[i] >= mx) return i;
+  return 0;
+}
 // Run the full generate loop using the last received prompt (recv_ids/recv_n).
 // Writes tokens to serial (raw text) and display, then emits a JSON done signal.
 static void run_generation() {
@@ -331,11 +365,8 @@ static void run_generation() {
   int64_t t_start = esp_timer_get_time();
 
   for (int step = 0; step < recv_max && pos < model.c.seq_len; step++) {
-    // greedy: argmax over the trained vocab
-    int best = 0; float bv = -1e30f;
-    for (int v = 0; v < VOCAB_N; v++)
-      if (s.logits[v] > bv) { bv = s.logits[v]; best = v; }
-    tok = best;
+    // temperature + top-k sampling (fixes EOS loop on small/Chinese models)
+    tok = sample_token(s.logits, VOCAB_N, SAMPLING_TEMP, SAMPLING_TOPK, &rng_state);
     emit(tok);
     blink((step & 1) ? 40 : 8);
 
@@ -427,9 +458,9 @@ void setup() {
   Serial.begin(115200);
   delay(1500);
   Serial.println("\n=== ESP32-S3 PLE TinyLM ===");
-  init_pcf85063();  // try PCF85063 RTC → settimeofday() for real date/time
+  init_pcf85063();  // try PCF85063 RTC 鈫?settimeofday() for real date/time
   init_adc();       // battery ADC (GPIO4, 3x divider)
-  init_wifi();      // WiFi STA (rickqi11) — async connect
+  init_wifi();      // WiFi STA (rickqi11) 鈥?async connect
   // Read battery once; WiFi will connect in background
 
   // Map the model partition.
@@ -527,3 +558,4 @@ void loop() {
   }
   delay(1);                                            // yield to idle task
 }
+
