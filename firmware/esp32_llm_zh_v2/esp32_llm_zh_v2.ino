@@ -167,7 +167,7 @@ static int read_battery_pct() {
 
 // ---- serial prompt ----------------------------------------------------------
 // Default demo prompt used when PROMPT_TIMEOUT_MS expires.
-static const int DEMO_PROMPT_IDS[] = {285, 995, 1186};   // "本报告" (v2 vocab)
+static const int DEMO_PROMPT_IDS[] = {269, 88, 11, 358, 204};   // "糖尿病二型" (v2 vocab)
 static const int DEMO_N_GENERATE = 200;
 
 // Emit one token to every active output (serial always; TFT when enabled).
