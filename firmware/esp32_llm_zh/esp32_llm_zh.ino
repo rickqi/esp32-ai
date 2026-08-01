@@ -61,6 +61,18 @@ static void sd_log_close() {
   if (sd_logfp) { fclose(sd_logfp); sd_logfp = NULL; }
 }
 
+// Dump the SD log over serial (UTF-8) — lets the user read Chinese output
+// without removing the SD card. Triggered by serial command "LOGD".
+static void sd_log_dump() {
+  if (!sd_ok) { Serial.println("LOGD_ERROR: no SD"); return; }
+  FILE *f = fopen("/sdcard/logs/llm.log", "r");
+  if (!f) { Serial.println("LOGD_ERROR: no log"); return; }
+  char c;
+  while (fread(&c, 1, 1, f) == 1) Serial.write((uint8_t)c);
+  fclose(f);
+  Serial.println("\n--- LOG END ---");
+}
+
 // Set to 1 once a display panel is wired up -- see display.h.
 // Leave 0 to run serial-only (no panel needed).
 #define USE_DISPLAY 1
@@ -618,6 +630,9 @@ void loop() {
 #else
         Serial.println("SCREENSHOT_ERROR: no RLCD display");
 #endif
+      }
+      else if (strcmp(line_buf, "LOGD") == 0) {
+        sd_log_dump();   // dump SD log (UTF-8) over serial
       }
       else if (line_buf[0] == '{' && parse_json_prompt(line_buf, recv_ids, &recv_n, &recv_max) == 0) {
         run_generation();
