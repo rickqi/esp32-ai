@@ -265,10 +265,11 @@ def build_samples_from_messages(messages):
     }
 
 
-def encode_sample(sample):
+def encode_sample(sample, tok=None):
     """Tokenize a sample text into ids + loss mask using the CharTokenizer."""
-    from chinese.tokenizer import CharTokenizer
-    tok = CharTokenizer.load(str(PROJECT_ROOT / "data_chinese" / "tokenizer.json"))
+    if tok is None:
+        from chinese.tokenizer import CharTokenizer
+        tok = CharTokenizer.load(str(PROJECT_ROOT / "data_chinese" / "tokenizer.json"))
     tok_user, tok_assist, tok_end = tok.USER, tok.ASSIST, tok.END
     if tok_user < 0:
         print("  [error] tokenizer.json has no SFT markers; run migrate step")
@@ -359,6 +360,12 @@ def main():
                     help="Only use WSL ChatML data, skip D:/docs/search_logs")
     ap.add_argument("--augment", action="store_true",
                     help="Add synonym-paraphrase variants of search_log questions")
+    ap.add_argument("--no-templates", action="store_true",
+                    help="Skip local template samples")
+    ap.add_argument("--template-cap", type=int, default=300,
+                    help="Max template samples to include (default 300)")
+    ap.add_argument("--no-deepseek", action="store_true",
+                    help="Skip DeepSeek-generated QA")
     ap.add_argument("--val-fraction", type=float, default=0.10)
     args = ap.parse_args()
 
@@ -413,10 +420,12 @@ def main():
                 n += 1
         print(f"  {name}: {len(items)} items -> {n} samples")
 
-    print("\n=== Phase 0.3b: local templates (Path C) ===")
+    print("\n=== Phase 0.3b: local templates (Path C, down-weighted) ===")
     templates_path = PROC_DIR / "templates.json"
-    if templates_path.exists():
+    if templates_path.exists() and not args.no_templates:
         tpl = json.load(open(templates_path, encoding="utf-8"))
+        # Cap templates at 300 (deepseek QA is now the primary high-quality source)
+        tpl = tpl[:args.template_cap]
         n = 0
         for t in tpl:
             s = build_samples_from_messages([
@@ -427,7 +436,26 @@ def main():
                 s["source"] = "template"
                 samples.append(s)
                 n += 1
-        print(f"  templates: {len(tpl)} -> {n} samples")
+        print(f"  templates: {len(tpl)} -> {n} samples (capped {args.template_cap})")
+
+    print("\n=== Phase 0.3c: DeepSeek generated QA (Path v2, primary) ===")
+    deepseek_path = PROC_DIR / "deepseek_qa.jsonl"
+    if deepseek_path.exists() and not args.no_deepseek:
+        n = 0
+        for line in deepseek_path.open(encoding="utf-8"):
+            try:
+                d = json.loads(line)
+            except Exception:
+                continue
+            s = build_samples_from_messages([
+                {"role": "user", "content": d["question"]},
+                {"role": "assistant", "content": d["answer"]},
+            ])
+            if s:
+                s["source"] = "deepseek"
+                samples.append(s)
+                n += 1
+        print(f"  deepseek QA: {n} samples")
 
     print(f"\nTotal samples: {len(samples)}")
     print(f"  by source: ", end="")
@@ -449,7 +477,7 @@ def main():
     encoded = []
     failed = 0
     for s in samples:
-        e = encode_sample(s)
+        e = encode_sample(s, tok=tok)
         if e:
             e["source"] = s.get("source", "")
             encoded.append(e)
