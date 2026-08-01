@@ -18,6 +18,7 @@
 #define LLM_PROFILE_NOW() esp_timer_get_time()
 #include "../common/llm.h"
 #include "vocab.h"
+#include "rag.h"   // device-side TF-IDF retrieval
 
 // ---- SD card logging (Waveshare RLCD-4.2: SDMMC, CLK=38 CMD=21 D0=39) ------
 // Writes every generation (prompt + output) as UTF-8 to /sdcard/logs/llm.log,
@@ -95,6 +96,101 @@ static int recv_max = 200;            // tokens to generate (from "max" field)
 static char line_buf[LINE_BUF_SIZE];  // line accumulation buffer
 static int line_pos = 0;              // current position in line_buf
 
+// ---- RAG state (device-side retrieval) -----------------------------------
+// Index lives in a data flash partition named "kb" (see partitions.csv).
+// It is mmap'd at boot; retrieval runs on the mmap'd bytes (PSRAM-friendly).
+static RagIndex rag;
+static bool rag_ready = false;
+
+static void rag_init() {
+  const esp_partition_t *kb = esp_partition_find_first(
+      ESP_PARTITION_TYPE_DATA, (esp_partition_subtype_t)0x41, "kb");
+  if (!kb) { Serial.println("kb partition not found — RAG disabled"); return; }
+  const void *base;
+  esp_partition_mmap_handle_t h;
+  if (esp_partition_mmap(kb, 0, kb->size, ESP_PARTITION_MMAP_DATA, &base, &h) != ESP_OK) {
+    Serial.println("kb mmap failed — RAG disabled"); return;
+  }
+  if (rag_load(&rag, (const uint8_t *)base) != 0) {
+    Serial.println("kb magic mismatch — RAG disabled"); return;
+  }
+  Serial.printf("RAG ready: %u docs, %u terms\n", rag.n_docs, rag.n_terms);
+  rag_ready = true;
+}
+
+// Decode recv_ids (skipping SFT markers) into a UTF-8 question buffer.
+static void decode_question(char *out, int out_sz) {
+  int o = 0;
+  for (int i = 0; i < recv_n && o < out_sz - 1; i++) {
+    int t = recv_ids[i];
+    if (t < 4 || t >= VOCAB_N) continue;          // skip BOS + markers
+    if (t == 2) continue;
+    if (t == (VOCAB_N == 6594 ? 6591 : 5901)) continue;  // <user>
+    if (t == (VOCAB_N == 6594 ? 6592 : 5902)) continue;  // <assistant>
+    if (t == (VOCAB_N == 6594 ? 6593 : 5903)) continue;  // <end>
+    int tlen = VOCAB_OFF[t + 1] - VOCAB_OFF[t];
+    for (int j = 0; j < tlen && o < out_sz - 1; j++)
+      out[o++] = (char)VOCAB_BLOB[VOCAB_OFF[t] + j];
+  }
+  out[o] = 0;
+}
+
+// Retrieve KB evidence for the question; write char-ids of top docs.
+// Returns number of docs, fills kb_docs[][48] with char-ids.
+static int rag_retrieve_for_question(uint16_t kb_docs[][48], int max_docs) {
+  if (!rag_ready) return 0;
+  char qbuf[160];
+  decode_question(qbuf, sizeof(qbuf));
+  if (!qbuf[0]) return 0;
+  // char-ids of the question (v2 vocab; UNK=1 for unknown chars)
+  uint16_t q_ids[RAG_MAX_Q];
+  int q_len = 0;
+  for (int i = 0; qbuf[i] && q_len < RAG_MAX_Q; i++) {
+    int cid = -1;
+    // char -> vocab id via VOCAB_BLOB reverse lookup is O(V); use a small
+    // forward map instead: char bytes -> id is impractical, so we scan.
+    // Simpler: only keep chars that are in our vocab by scanning VOCAB_BLOB
+    // would be slow. We instead rely on the PC to have sent question tokens,
+    // and re-use recv_ids filtered to real chars (already decoded above).
+    (void)cid;
+  }
+  // Use decoded text chars: map via a compact char->id lookup table built
+  // once. For simplicity here we skip unknown chars (UNK) which is fine for
+  // retrieval (they rarely match KB terms).
+  uint32_t best[RAG_TOP_K];
+  int scores[RAG_TOP_K];
+  int n = rag_retrieve(&rag, q_ids_placeholder(qbuf, q_ids, &q_len),
+                       q_len, best, scores);
+  int got = 0;
+  for (int k = 0; k < n && got < max_docs; k++) {
+    uint32_t nch = rag_doc_chars(&rag, best[k], kb_docs[got], 47);
+    kb_docs[got][nch] = 0;
+    got++;
+  }
+  return got;
+}
+
+// Placeholder: build q_ids from UTF-8 chars using the vocab's stoi via
+// VOCAB_BLOB scan is O(V) per char — acceptable at boot for a short question
+// only if vocab is small; here we keep it simple and rely on tokenizer
+// parity: chars that appear in the question were sent by the PC as tokens,
+// so we map them back from the already-decoded buffer by scanning the blob
+// once per question (bounded by q_len * avg token len). Implemented below.
+static uint16_t *q_ids_placeholder(const char *q, uint16_t *out, int *n) {
+  int o = 0;
+  for (int i = 0; q[i] && o < RAG_MAX_Q; i++) {
+    // find char id by scanning VOCAB_BLOB tokens (slow but bounded)
+    int found = -1;
+    for (int t = 4; t < VOCAB_N && found < 0; t++) {
+      int tl = VOCAB_OFF[t + 1] - VOCAB_OFF[t];
+      if (tl == 1 && (char)VOCAB_BLOB[VOCAB_OFF[t]] == q[i]) found = t;
+    }
+    if (found >= 0) out[o++] = (uint16_t)found;
+  }
+  *n = o;
+  return out;
+}
+
 // ---- WiFi STA + Battery ADC globals ----------------------------------------
 static char wifi_status[20] = "No WiFi";
 static float battery_voltage = 3.7f;
@@ -167,7 +263,7 @@ static int read_battery_pct() {
 
 // ---- serial prompt ----------------------------------------------------------
 // Default demo prompt used when PROMPT_TIMEOUT_MS expires.
-static const int DEMO_PROMPT_IDS[] = {269, 88, 11, 358, 204};   // "糖尿病二型" (v2 vocab)
+static const int DEMO_PROMPT_IDS[] = {716, 407, 31, 132, 267};   // "糖尿病二型" (v1 vocab)
 static const int DEMO_N_GENERATE = 200;
 
 // Emit one token to every active output (serial always; TFT when enabled).
@@ -361,10 +457,10 @@ static int parse_json_prompt(const char *json, int *ids, int *n, int *max) {
 // Sampling: temperature + top-k + repetition penalty. Greedy argmax makes the
 // small Chinese model loop on EOS; sampling escapes the attractor and produces
 // varied text.  Repetition penalty (like sft_generate.py) suppresses degenerate
-// loops such as "痞痞痞..." on the quantized zh5-med model.
-#define SAMPLING_TEMP  1.0f
+// loops ("痞痞痞..." / block repetition) on the quantized models.
+#define SAMPLING_TEMP  0.7f
 #define SAMPLING_TOPK  40
-#define REPETITION_PENALTY 1.3f
+#define REPETITION_PENALTY 1.4f
 #define HIST_WINDOW    50      // penalize tokens seen in the last 50 positions
 static uint32_t rng_state = 42;
 static uint32_t xrng() {
@@ -405,9 +501,49 @@ static int sample_token(float *logits, int n, float temp, int topk, uint32_t *rn
   for (int i = n - 1; i >= 0; i--) if (logits[i] >= mx) return i;
   return 0;
 }
+// Retrieve KB evidence and prepend it to the prompt: builds a new id sequence
+//   BOS <user> [KB1][KB2] QUESTION <end> <assistant>
+// Returns the new length (0 = no evidence found, keep original prompt).
+static int rag_augment_prompt() {
+  if (!rag_ready) return 0;
+  uint16_t kb_docs[RAG_TOP_K][48];
+  int nd = rag_retrieve_for_question(kb_docs, RAG_TOP_K);
+  if (nd == 0) return 0;
+
+  int uid = (VOCAB_N == 6594 ? 6591 : 5901);  // <user>
+  int eid = (VOCAB_N == 6594 ? 6593 : 5903);  // <end>
+  int aid = (VOCAB_N == 6594 ? 6592 : 5902);  // <assistant>
+
+  int nb = 0;
+  int tmp[MAX_PROMPT_IDS];
+  tmp[nb++] = 2;                                   // BOS
+  tmp[nb++] = uid;
+  // evidence docs first (each doc = char-ids of KB question+answer)
+  for (int k = 0; k < nd; k++) {
+    for (int j = 0; kb_docs[k][j] && nb < MAX_PROMPT_IDS - 16; j++)
+      tmp[nb++] = kb_docs[k][j];
+    if (nb < MAX_PROMPT_IDS - 16) tmp[nb++] = '\n';  // separator
+  }
+  // original question (recv_ids already includes BOS <user> Q <end> <assistant>;
+  // strip BOS+markers and re-add after evidence)
+  for (int i = 0; i < recv_n && nb < MAX_PROMPT_IDS - 8; i++) {
+    int t = recv_ids[i];
+    if (t == 2 || t == uid || t == eid || t == aid) continue;
+    tmp[nb++] = t;
+  }
+  tmp[nb++] = eid;
+  tmp[nb++] = aid;
+
+  memcpy(recv_ids, tmp, nb * sizeof(int));
+  recv_n = nb;
+  Serial.printf("[RAG] prepended %d evidence docs\n", nd);
+  return nb;
+}
+
 // Run the full generate loop using the last received prompt (recv_ids/recv_n).
 // Writes tokens to serial (raw text) and display, then emits a JSON done signal.
 static void run_generation() {
+  rag_augment_prompt();  // device-side RAG: prepend KB evidence to prompt
   sd_log_open("generation");   // open UTF-8 log on SD (prompt+output via emit)
 #if USE_DISPLAY
   display_home();
@@ -636,6 +772,8 @@ void setup() {
   s.vcache = (float *)ps((size_t)L * S * D * 4);
   Serial.printf("PSRAM free after alloc: %u KB\n\n",
                 heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024);
+
+  rag_init();  // load device-side KB index (mmap "kb" partition)
 
   // ---- ready for serial prompt input ----
   Serial.println("{\"ready\":true}");
