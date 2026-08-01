@@ -118,8 +118,26 @@ firmware/model_v2/  # (gitignored) 量化导出产物
 | 甲状腺切除 | 无关联文本 | 关联喉返神经/手术 ✅ |
 | 文本自然度 | 低（LaTeX 噪声） | **高**（干净医学语料） |
 
-## 六、已知限制与后续
+## 六、部署评估（已确认 ✅）
+
+| 项 | 值 | 状态 |
+|---|---|---|
+| **model.bin** | 7.10MB / 14.5MB Flash 分区 | ✅ 可烧录 |
+| **PSRAM** | 3.73MB / 8MB | ✅ 富余 4.3MB |
+| **vocab.h** | 6,594 tokens（独立，19.1KB） | ✅ 已生成 |
+| 量化配置 | 4-bit group=32 | ✅ 已验证 |
+| 推理速度估算 | ~2 tok/s（core flash 读取瓶颈） | ⚠️ 慢但可用 |
+
+**v2 部署产物**：
+```
+firmware/model_v2/model.bin        (7.10MB, 85 tensors, PLE1)
+firmware/model_v2/golden.npz/.txt  (4-bit golden 参考)
+firmware/esp32_llm_zh_v2/vocab.h   (6594 tokens)
+```
+
+## 七、已知限制与后续
 
 - 12.5-13.7M 小模型**精准问答**仍受限 → 需方案 B（RAG）
 - 预训练 20K 步可继续增加（val 仍在下行）
 - SFT 30K/1.95M 可扩大采样
+- 4-bit 量化敏感 → 8-bit 保真但 model.bin 翻倍（如追求质量可选）
