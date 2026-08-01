@@ -20,7 +20,8 @@ firmware/esp32_llm/vocab.h
 # chinese pipeline generated data + runs (regenerate with chinese/*.py)
 data_chinese/*.bin
 data_chinese/*.txt
-data_chinese/*.json
+# tokenizer.json is tracked — required to regenerate firmware vocab.h on any machine
+!data_chinese/tokenizer.json
 data_chinese/sft/
 runs_chinese/
 firmware/model_chinese/
