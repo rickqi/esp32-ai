@@ -39,6 +39,15 @@ DATA_CHINESE = PROJECT_ROOT / "data_chinese"
 RUNS_SFT = PROJECT_ROOT / "runs_chinese" / "sft"
 
 
+def resolve_env(data_dir, runs_dir):
+    """Switch tokenizer + runs output to an alternate environment."""
+    global DATA_CHINESE, RUNS_SFT
+    if data_dir:
+        DATA_CHINESE = Path(data_dir)
+    if runs_dir:
+        RUNS_SFT = Path(runs_dir)
+
+
 # ---------------------------------------------------------------------------
 #  Dataset
 # ---------------------------------------------------------------------------
@@ -210,7 +219,11 @@ def main():
     ap.add_argument("--instruction-ratio", type=float, default=0.8)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--tag", default="zh2-sft")
+    ap.add_argument("--data-dir", default=None, help="Env data dir for tokenizer (e.g. data_v2)")
+    ap.add_argument("--runs-dir", default=None, help="Env runs dir (e.g. runs_v2)")
     args = ap.parse_args()
+
+    resolve_env(args.data_dir, args.runs_dir)
 
     torch.manual_seed(args.seed)
     device = get_device()
