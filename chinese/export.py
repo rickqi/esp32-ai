@@ -28,7 +28,9 @@ from export import quant_pack  # noqa: E402  (exact same packing as English)
 RUNS = PROJECT_ROOT / "runs_chinese"
 OUT = PROJECT_ROOT / "firmware" / "model_chinese"
 MAGIC = 0x504C4531  # "PLE1"
-GROUP = 128
+# group=32 for fine-grained quantization — SFT models are 4-bit sensitive;
+# group=128 collapses generations (verified on zh5-med). 8-bit fully preserves.
+GROUP = 32
 
 
 def resolve_env(runs_dir, out_dir):
