@@ -29,8 +29,17 @@ DATA = PROJECT_ROOT / "data_chinese"
 RUNS = PROJECT_ROOT / "runs_chinese"
 
 
+def resolve_env(data_dir, runs_dir):
+    """Switch to an alternate environment (e.g. chinese_v2)."""
+    global DATA, RUNS
+    if data_dir:
+        DATA = Path(data_dir)
+    if runs_dir:
+        RUNS = Path(runs_dir)
+
+
 def find_ckpt(tag, seed):
-    """Check runs_chinese/ and runs_chinese/sft/ for the checkpoint."""
+    """Check runs_dir/ and runs_dir/sft/ for the checkpoint."""
     for base in (RUNS, RUNS / "sft"):
         p = base / f"ple-{tag}-s{seed}.pt"
         if p.exists():
@@ -87,7 +96,10 @@ def main():
     ap.add_argument("--tag", default="zh")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--fp16-scales", action="store_true")
+    ap.add_argument("--data-dir", default=None, help="Env data dir (e.g. data_v2)")
+    ap.add_argument("--runs-dir", default=None, help="Env runs dir (e.g. runs_v2)")
     args = ap.parse_args()
+    resolve_env(args.data_dir, args.runs_dir)
     device = get_device()
 
     path = find_ckpt(args.tag, args.seed)

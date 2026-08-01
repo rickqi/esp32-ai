@@ -31,8 +31,17 @@ MAGIC = 0x504C4531  # "PLE1"
 GROUP = 128
 
 
+def resolve_env(runs_dir, out_dir):
+    """Switch to an alternate environment (e.g. chinese_v2)."""
+    global RUNS, OUT
+    if runs_dir:
+        RUNS = Path(runs_dir)
+    if out_dir:
+        OUT = Path(out_dir)
+
+
 def find_ckpt(tag):
-    """Check runs_chinese/ and runs_chinese/sft/ for the checkpoint."""
+    """Check runs_dir/ and runs_dir/sft/ for the checkpoint."""
     for base in (RUNS, RUNS / "sft"):
         p = base / f"{tag}.pt"
         if p.exists():
@@ -41,7 +50,14 @@ def find_ckpt(tag):
 
 
 def main():
-    tag = sys.argv[1] if len(sys.argv) > 1 else "ple-zh-s42"
+    import argparse
+    ap = argparse.ArgumentParser(description="Export Chinese model to flat binary")
+    ap.add_argument("tag", nargs="?", default="ple-zh-s42")
+    ap.add_argument("--runs-dir", default=None, help="Env runs dir (e.g. runs_v2)")
+    ap.add_argument("--out-dir", default=None, help="Env out dir (e.g. firmware/model_v2)")
+    args = ap.parse_args()
+    tag = args.tag
+    resolve_env(args.runs_dir, args.out_dir)
     os.makedirs(OUT, exist_ok=True)
 
     ck_path = find_ckpt(tag)
