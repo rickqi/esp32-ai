@@ -568,13 +568,14 @@ static void display_draw_header(const char *wifi_status, int bat_pct, float temp
   // left: WiFi icon + SSID
   rlcd_draw_wifi_icon(TEXT_LEFT, y, strcmp(wifi_status, "No WiFi") != 0);
   rlcd_draw_text_inv(TEXT_LEFT + 10, y, wifi_status);
-  // right: battery icon + pct, and temp/humi
+  // right: temp/humi | battery icon + pct (non-overlapping, right-aligned)
   char buf[20];
-  snprintf(buf, sizeof(buf), "%.0fC %.0f%%", temp, humi);
-  rlcd_draw_text_inv(TEXT_RIGHT - strlen(buf)*CW - 18, y, buf);
-  snprintf(buf, sizeof(buf), "%d%%", bat_pct);
-  rlcd_draw_battery_icon(TEXT_RIGHT - 16, y, bat_pct);
-  rlcd_draw_text_inv(TEXT_RIGHT - strlen(buf)*CW, y, buf);
+  snprintf(buf, sizeof(buf), "%d%%", bat_pct);              // "65%" = 3ch, 18px
+  int px = TEXT_RIGHT - strlen(buf) * CW;                    // pct text rightmost
+  rlcd_draw_text_inv(px, y, buf);
+  rlcd_draw_battery_icon(px - 18, y, bat_pct);              // icon 16px + 2px gap, left of pct
+  snprintf(buf, sizeof(buf), "%.0fC %.0f%%", temp, humi);   // temp/humi left of icon
+  rlcd_draw_text_inv(px - 18 - strlen(buf) * CW - 2, y, buf);
   rlcd->RLCD_Display();
 }
 
