@@ -28,6 +28,13 @@ firmware/model_chinese/
 firmware/esp32_llm_zh/vocab.h
 chinese/__pycache__/
 
+# chinese_v2 environment (independent, regenerable)
+data_v2/
+runs_v2/
+firmware/model_v2/
+firmware/esp32_llm_zh_v2/vocab.h
+chinese_v2/__pycache__/
+
 # raw video / recordings (demo footage — keep out of the repo)
 video/
 videos/

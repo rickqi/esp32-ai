@@ -41,6 +41,18 @@ VAL_BIN = DATA_DIR / "val.bin"
 TOKENIZER_JSON = DATA_DIR / "tokenizer.json"
 
 
+def resolve_env(data_dir, runs_dir):
+    """Switch to an alternate environment (e.g. chinese_v2) via env flags."""
+    global DATA_DIR, RUNS_DIR, TRAIN_BIN, VAL_BIN, TOKENIZER_JSON
+    if data_dir:
+        DATA_DIR = Path(data_dir)
+    if runs_dir:
+        RUNS_DIR = Path(runs_dir)
+    TRAIN_BIN = DATA_DIR / "train.bin"
+    VAL_BIN = DATA_DIR / "val.bin"
+    TOKENIZER_JSON = DATA_DIR / "tokenizer.json"
+
+
 # ---------------------------------------------------------------------------
 #  Training helpers (adapted from src/train.py)
 # ---------------------------------------------------------------------------
@@ -110,7 +122,11 @@ def main():
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--tag", default="zh")
     ap.add_argument("--device", default=None, help="Override device auto-detection")
+    ap.add_argument("--data-dir", default=None, help="Env data dir (e.g. data_v2)")
+    ap.add_argument("--runs-dir", default=None, help="Env runs dir (e.g. runs_v2)")
     args = ap.parse_args()
+
+    resolve_env(args.data_dir, args.runs_dir)
 
     # Validate data
     if not TRAIN_BIN.exists():
