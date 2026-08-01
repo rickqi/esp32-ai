@@ -472,6 +472,8 @@ static void run_generation() {
     // appear mid-generation (only EOS/<end> may terminate).
     // Token ids are vocab-dependent: v1 vocab (5904) has <user>/<assistant>/<end>
     // at 5901/5902/5903; v2 vocab (6594) puts them at 6591/6592/6593.
+    // <BOS> (2) is also blocked: the model must never re-emit the start marker.
+    s.logits[2] = -1e30f;                              // <BOS>
     if (VOCAB_N == 5904) { s.logits[5901] = -1e30f; s.logits[5902] = -1e30f; }
     else if (VOCAB_N == 6594) { s.logits[6591] = -1e30f; s.logits[6592] = -1e30f; }
     // temperature + top-k sampling with repetition penalty
