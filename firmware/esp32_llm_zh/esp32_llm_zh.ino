@@ -46,6 +46,9 @@ static char wifi_status[20] = "No WiFi";
 static float battery_voltage = 3.7f;
 static float shtc3_temp = 25.0f, shtc3_humi = 50.0f;
 static unsigned long last_wifi_check = 0;
+#if USE_DISPLAY && DISPLAY_KIND == DISPLAY_RLCD_ST7305
+static bool display_suppress = false;  // suppress 1x display during 2x prompt priming
+#endif
 
 // Refresh WiFi status (called from run_generation / header draw).
 static void update_wifi_status() {
@@ -101,6 +104,13 @@ static float read_battery() {
   return mv * 3.0f / 1000.0f;                   // battery voltage (3x divider)
 }
 
+static int read_battery_pct() {
+  float v = read_battery();
+  if (v < 3.0f) return 0;
+  if (v > 4.12f) return 100;
+  return (int)((v - 3.0f) / 1.12f * 100.0f);
+}
+
 // ---- serial prompt ----------------------------------------------------------
 // Default demo prompt used when PROMPT_TIMEOUT_MS expires.
 static const int DEMO_PROMPT_IDS[] = {54, 255, 363};  // "鏈姤鍛?
@@ -116,7 +126,7 @@ static void emit(int tok) {
   // whole generation once the TX buffer fills.
   if ((int)Serial.availableForWrite() >= len) Serial.write(bytes, len);
 #if USE_DISPLAY
-  display_puts(bytes, len);
+  if (!display_suppress) display_puts(bytes, len);
 #endif
 }
 
@@ -334,15 +344,26 @@ static void run_generation() {
   display_home();
 #endif
 #if USE_DISPLAY && DISPLAY_KIND == DISPLAY_RLCD_ST7305
-  // TUI: border frame + header(wifi+title+battery) + prompt prefix
+  // TUI: border frame + two-row header + 2x prompt prefix
   display_draw_frame();
   update_wifi_status();               // refresh WiFi
-  battery_voltage = read_battery();   // refresh ADC
+  int bat_pct = read_battery_pct();   // battery %
   read_shtc3(&shtc3_temp, &shtc3_humi);  // refresh SHTC3
-  display_draw_header(wifi_status, battery_voltage, shtc3_temp, shtc3_humi);
+  display_draw_header(wifi_status, bat_pct, shtc3_temp, shtc3_humi);
   display_draw_hline(DIV1_Y);
-  display_set_cursor(5, PRM_Y);
-  display_puts((const unsigned char *)"> ", 2);
+  // Prompt in 2x: decode recv_ids to bytes, render "> " + prompt
+  char prompt_buf[160];
+  int plen = 0;
+  for (int i = 0; i < recv_n && plen < (int)sizeof(prompt_buf) - 1; i++) {
+    int t = recv_ids[i];
+    if (t < 0 || t >= VOCAB_N) continue;
+    int tlen = VOCAB_OFF[t + 1] - VOCAB_OFF[t];
+    for (int j = 0; j < tlen && plen < (int)sizeof(prompt_buf) - 1; j++)
+      prompt_buf[plen++] = (char)VOCAB_BLOB[VOCAB_OFF[t] + j];
+  }
+  prompt_buf[plen] = 0;
+  display_draw_prompt_2x("> ", (const unsigned char *)prompt_buf, plen);
+  display_suppress = true;  // priming emit() must not 1x-draw the prompt again
 #endif
   int pos = 0, tok = 0;
   int64_t decode_us = 0;
@@ -355,6 +376,7 @@ static void run_generation() {
   }
 
 #if USE_DISPLAY && DISPLAY_KIND == DISPLAY_RLCD_ST7305
+  display_suppress = false;  // generation tokens draw normally (1x output area)
   // Fixed divider + output area (between prompt and footer)
   display_draw_hline(DIV2_Y);
   display_set_output_area(OUT_Y, DIV3_Y - 1);
@@ -368,6 +390,9 @@ static void run_generation() {
     // temperature + top-k sampling (fixes EOS loop on small/Chinese models)
     tok = sample_token(s.logits, VOCAB_N, SAMPLING_TEMP, SAMPLING_TOPK, &rng_state);
     emit(tok);
+#if USE_DISPLAY && DISPLAY_KIND == DISPLAY_RLCD_ST7305
+    display_draw_cursor();   // show live generation position
+#endif
     blink((step & 1) ? 40 : 8);
 
     int64_t d0 = esp_timer_get_time();

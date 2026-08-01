@@ -508,15 +508,17 @@ static void rlcd_draw_rect(int x0, int y0, int x1, int y1) {
 // Draw the full-screen TUI frame with section dividers.
 // Layout: border → header(2x) → div → prompt(2x) → div → output → div → footer → border
 // Layout zone positions (pixel rows).  TUI_* are now computed from BORDER_W above.
-#define HDR_Y1      3
+#define HDR_Y1      3     // header row 1: 2x title
 #define HDR_Y2      16
-#define DIV1_Y      17
-#define PRM_Y       19
-#define DIV2_Y      34
-#define OUT_Y       36
-#define DIV3_Y      283
-#define FTR_Y1      284
-#define FTR_Y2      295     // end inside the 2px bottom border (y=296-297)
+#define HDR2_Y1     17    // header row 2: 1x sensor strip
+#define HDR2_Y2     26
+#define DIV1_Y      27
+#define PRM_Y       29    // prompt (2x font, 14px tall)
+#define DIV2_Y      45
+#define OUT_Y       47
+#define DIV3_Y      281
+#define FTR_Y1      282
+#define FTR_Y2      293     // end inside the 2px bottom border (y=296-297)
 #define FOOTER_Y    FTR_Y1   // alias for backward compat
 
 static void display_draw_frame() {
@@ -524,21 +526,75 @@ static void display_draw_frame() {
   rlcd->RLCD_Display();
 }
 
-// Inverted header bar with WiFi status + title + temp/humidity + battery % (1x font).
+// ---- small pixel icons ------------------------------------------------------
+// WiFi signal icon (10x8): two arcs + base dot. Draws in ColorBlack.
+static void rlcd_draw_wifi_icon(int x, int y, bool on) {
+  static const uint8_t WIFI[8] = {
+    0b00011000,  //    ##
+    0b00100100,  //   #  #
+    0b01000010,  //  #    #
+    0b00111100,  //   ####
+    0b00000000,
+    0b00011000,  //    ##   base
+    0b00011000,  //    ##
+    0b00000000,
+  };
+  for (int r = 0; r < 8; r++) {
+    uint8_t row = on ? WIFI[r] : 0b00000000;
+    for (int c = 0; c < 8; c++)
+      if (row & (0x80 >> c)) rlcd->RLCD_SetPixel(x + c, y + r, ColorBlack);
+  }
+}
+
+// Battery icon (16x8): outline + fill bar proportional to pct (0-100).
+static void rlcd_draw_battery_icon(int x, int y, int pct) {
+  for (int i = 0; i < 14; i++) { rlcd->RLCD_SetPixel(x+i, y, ColorBlack); rlcd->RLCD_SetPixel(x+i, y+7, ColorBlack); }
+  for (int i = 0; i < 8; i++) { rlcd->RLCD_SetPixel(x, y+i, ColorBlack); rlcd->RLCD_SetPixel(x+13, y+i, ColorBlack); }
+  rlcd_fill_rect(x+14, y+2, x+16, y+5);  // nub
+  int fill = (12 * pct) / 100;
+  for (int i = 0; i < fill; i++)
+    for (int j = 0; j < 6; j++)
+      rlcd->RLCD_SetPixel(x+1+i, y+1+j, ColorBlack);
+}
+
+// Two-row inverted header: row1 = 2x title, row2 = WiFi icon+SSID + temp/humi + battery icon+pct.
 static void display_draw_header(const char *wifi_status, int bat_pct, float temp, float humi) {
+  // Row 1: 2x title bar
   rlcd_fill_rect(TUI_LEFT+1, HDR_Y1, TUI_RIGHT-1, HDR_Y2);
-  int y = HDR_Y1 + 3;
-  rlcd_draw_text_inv(TEXT_LEFT, y, wifi_status);                   // left: WiFi
-  rlcd_draw_text_inv(TEXT_LEFT + 55, y, "ESP32-S3 PLE LLM");      // center: title
+  rlcd_draw_text_2x_inv(TEXT_LEFT, HDR_Y1+1, "ESP32-S3 PLE LLM");
+  // Row 2: 1x sensor strip
+  rlcd_fill_rect(TUI_LEFT+1, HDR2_Y1, TUI_RIGHT-1, HDR2_Y2);
+  int y = HDR2_Y1 + 1;
+  // left: WiFi icon + SSID
+  rlcd_draw_wifi_icon(TEXT_LEFT, y, strcmp(wifi_status, "No WiFi") != 0);
+  rlcd_draw_text_inv(TEXT_LEFT + 10, y, wifi_status);
+  // right: temp/humi | battery icon + pct (non-overlapping, right-aligned)
   char buf[20];
-  snprintf(buf, sizeof(buf), "%.0fC %.0f%% %d%%", temp, humi, bat_pct);  // right: temp humi batt%
-  rlcd_draw_text_inv(TEXT_RIGHT - strlen(buf) * CW, y, buf);
+  snprintf(buf, sizeof(buf), "%d%%", bat_pct);              // "65%" = 3ch, 18px
+  int px = TEXT_RIGHT - strlen(buf) * CW;                    // pct text rightmost
+  rlcd_draw_text_inv(px, y, buf);
+  rlcd_draw_battery_icon(px - 18, y, bat_pct);              // icon 16px + 2px gap, left of pct
+  snprintf(buf, sizeof(buf), "%.0fC %.0f%%", temp, humi);   // temp/humi left of icon
+  rlcd_draw_text_inv(px - 18 - strlen(buf) * CW - 2, y, buf);
   rlcd->RLCD_Display();
 }
 
 // Horizontal separator line inside the frame.
 static void display_draw_hline(int y) {
   for (int x = TUI_LEFT+1; x < TUI_RIGHT; x++) rlcd->RLCD_SetPixel(x, y, ColorBlack);
+  rlcd->RLCD_Display();
+}
+
+// Generation cursor: a thin bar at the current output position, so the user
+// sees where the next token will appear during generation.
+static void display_draw_cursor() {
+  int cx = ox, cy = oy;
+  // Clamp to output area so the cursor never overlaps the border/footer
+  if (cx < TEXT_LEFT) cx = TEXT_LEFT;
+  if (cy < out_top) cy = out_top;
+  for (int y = cy; y < cy + CH && y < out_bottom; y++)
+    for (int x = cx; x < cx + 2; x++)
+      if (x < TEXT_RIGHT) rlcd->RLCD_SetPixel(x, y, ColorBlack);
   rlcd->RLCD_Display();
 }
 
@@ -559,6 +615,7 @@ static void display_draw_prompt_2x(const char *prefix, const unsigned char *body
 // All fields occupy PRECISE pixel positions, no wrapping, no overflow.
 // Layout (CW=6):  TP=7ch | Ms=5ch | MP=5ch | HW=8ch | [flex] | DT=10ch(right-aligned)
 static void display_draw_footer(float tok_s, float ms) {
+  for (int x = TUI_LEFT+1; x < TUI_RIGHT; x++) rlcd->RLCD_SetPixel(x, DIV3_Y, ColorBlack);  // sep line
   rlcd_fill_rect(TUI_LEFT, FTR_Y1, TUI_RIGHT, FTR_Y2);
   int x = TEXT_LEFT, y = FTR_Y1 + 2;
   // Throughput: "%5.1f" + "t/s" = 7 chars at fixed x
