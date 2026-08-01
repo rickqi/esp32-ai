@@ -30,6 +30,8 @@
   （"痞痞痞..."块循环）。修复为 `quant_pack(t, group=GROUP)`
 - ✅ **C 端验证**: WSL 重导出 model.bin 7.71MB，verify.c PASS（max abs diff 0.00001）
 - ✅ **端侧实测**: 医学 prompt 生成有意义中文（"喑是很正常人"），无 NaN 块循环
+- 🔧 **footer 模型参数修复**: 底部状态栏"28.9M"(英文模型)改为按 VOCAB_N 显示实际
+  模型(v1=12.5M, v2=13.7M)，不再误导
 - ✅ **防御性修复**: export.py/quantize.py 增加 NaN/Inf 清零；verify.c probe 越界修复
 - 提交: (本批次) (feat: RLCD CJK display (7854 glyphs) + v2 firmware + fix v2 NaN root cause (group param))
 

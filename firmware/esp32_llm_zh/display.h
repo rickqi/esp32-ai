@@ -733,8 +733,13 @@ static void display_draw_footer(float tok_s, float ms) {
   // Latency: "%3.0f" + "ms" = 5 chars at x+7*CW+6 = x+48
   snprintf(buf, sizeof(buf), "%3.0fms", round(ms));
   rlcd_draw_text_inv(x + 48, y, buf);
-  // Model: "28.9M" (5 chars) at x+48+5*CW+6 = x+48+36 = x+84
-  rlcd_draw_text_inv(x + 84, y, "28.9M");
+  // Model: param count.  v1 Chinese model (V=5904 D=160 L=8 F=244 P=192)
+  // is 12.51M -- NOT the English model's 28.9M.
+#if VOCAB_N >= 6500
+  rlcd_draw_text_inv(x + 84, y, "13.7M");   // zh5-med (v2)
+#else
+  rlcd_draw_text_inv(x + 84, y, "12.5M");   // zh4-ds (v1)
+#endif
   // Hardware: "S3-N16R8" (8 chars) at x+84+5*CW+6 = x+84+36 = x+120
   rlcd_draw_text_inv(x + 120, y, "S3-N16R8");
   // Date/time from system clock (set by PCF85063 RTC via settimeofday,
