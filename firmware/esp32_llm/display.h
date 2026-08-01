@@ -524,17 +524,14 @@ static void display_draw_frame() {
   rlcd->RLCD_Display();
 }
 
-// Inverted header bar with WiFi status + title + temp/humidity + battery (1x font).
-static void display_draw_header(const char *wifi_status, float battery_v, float temp, float humi) {
+// Inverted header bar with WiFi status + title + temp/humidity + battery % (1x font).
+static void display_draw_header(const char *wifi_status, int bat_pct, float temp, float humi) {
   rlcd_fill_rect(TUI_LEFT+1, HDR_Y1, TUI_RIGHT-1, HDR_Y2);
   int y = HDR_Y1 + 3;
-  // Left: WiFi status (8 chars max)
-  rlcd_draw_text_inv(TEXT_LEFT, y, wifi_status);
-  // Center: title
-  rlcd_draw_text_inv(TEXT_LEFT + 55, y, "ESP32-S3 PLE LLM");
-  // Right-aligned: temp + humidity + battery (auto-sized, no overlap)
+  rlcd_draw_text_inv(TEXT_LEFT, y, wifi_status);                   // left: WiFi
+  rlcd_draw_text_inv(TEXT_LEFT + 55, y, "ESP32-S3 PLE LLM");      // center: title
   char buf[20];
-  snprintf(buf, sizeof(buf), "%.0fC %.0f%% %.1fV", temp, humi, battery_v);
+  snprintf(buf, sizeof(buf), "%.0fC %.0f%% %d%%", temp, humi, bat_pct);  // right: temp humi batt%
   rlcd_draw_text_inv(TEXT_RIGHT - strlen(buf) * CW, y, buf);
   rlcd->RLCD_Display();
 }

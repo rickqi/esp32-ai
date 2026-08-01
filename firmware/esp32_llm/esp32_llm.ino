@@ -48,13 +48,16 @@ static float shtc3_temp = 25.0f, shtc3_humi = 50.0f;
 static unsigned long last_wifi_check = 0;
 
 // Refresh WiFi status (called from run_generation / header draw).
+// Always produces a FIXED 8-char-or-less string for the header (no overlap).
 static void update_wifi_status() {
   unsigned long now = millis();
   if (now - last_wifi_check < 5000) return;  // throttle 5s
   last_wifi_check = now;
   if (WiFi.status() == WL_CONNECTED) {
-    IPAddress ip = WiFi.localIP();
-    snprintf(wifi_status, sizeof(wifi_status), "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
+    // Use SSID (8 chars max) — fixed width, no overlap with center title
+    String ssid = WiFi.SSID();
+    strncpy(wifi_status, ssid.c_str(), 8);
+    wifi_status[8] = '\0';
   } else {
     strcpy(wifi_status, "No WiFi");
   }
@@ -99,6 +102,13 @@ static float read_battery() {
   int raw = adc1_get_raw(ADC1_CHANNEL_3);
   float mv = (float)raw * 3300.0f / 4095.0f;   // mV @ ADC pin
   return mv * 3.0f / 1000.0f;                   // battery voltage (3x divider)
+}
+
+static int read_battery_pct() {
+  float v = read_battery();
+  if (v < 3.0f) return 0;
+  if (v > 4.12f) return 100;
+  return (int)((v - 3.0f) / 1.12f * 100.0f);
 }
 
 // ---- serial prompt ----------------------------------------------------------
@@ -303,9 +313,9 @@ static void run_generation() {
   // TUI: border frame + header(wifi+title+battery) + prompt prefix
   display_draw_frame();
   update_wifi_status();               // refresh WiFi
-  battery_voltage = read_battery();   // refresh ADC
+  int bat_pct = read_battery_pct();   // battery %
   read_shtc3(&shtc3_temp, &shtc3_humi);  // refresh SHTC3
-  display_draw_header(wifi_status, battery_voltage, shtc3_temp, shtc3_humi);
+  display_draw_header(wifi_status, bat_pct, shtc3_temp, shtc3_humi);
   display_draw_hline(DIV1_Y);
   display_set_cursor(5, PRM_Y);
   display_puts((const unsigned char *)"> ", 2);
