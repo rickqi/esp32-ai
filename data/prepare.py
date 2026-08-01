@@ -13,7 +13,10 @@ import requests
 from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-URL = "https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStories-train.txt"
+MIRRORS = {
+    "hf":       "https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStories-train.txt",
+    "modelscope": "https://www.modelscope.cn/datasets/AI-ModelScope/TinyStories/resolve/master/TinyStories-train.txt",
+}
 RAW = os.path.join(HERE, "tinystories_slice.txt")
 VOCAB_SIZE = 4096  # overridden by --vocab; 4096 keeps the original bin names
 # ~300MB of stories is ~75M tokens: enough to overtrain a 1M-param core well past
@@ -22,22 +25,29 @@ SLICE_BYTES = 300 * 1024 * 1024
 VAL_FRACTION = 0.005
 
 
-def download():
+def download(url):
     if os.path.exists(RAW) and os.path.getsize(RAW) >= SLICE_BYTES * 0.99:
         print(f"already have {RAW}")
         return
     print(f"downloading first {SLICE_BYTES / 1e6:.0f}MB of TinyStories...")
+    print(f"  from {url}")
     got = 0
-    with requests.get(URL, stream=True, timeout=60) as r:
-        r.raise_for_status()
-        with open(RAW, "wb") as f:
-            for chunk in r.iter_content(chunk_size=1 << 20):
-                f.write(chunk)
-                got += len(chunk)
-                if got >= SLICE_BYTES:
-                    break
-                if got % (25 << 20) < (1 << 20):
-                    print(f"  {got / 1e6:.0f}MB", flush=True)
+    try:
+        with requests.get(url, stream=True, timeout=120) as r:
+            r.raise_for_status()
+            with open(RAW, "wb") as f:
+                for chunk in r.iter_content(chunk_size=1 << 20):
+                    f.write(chunk)
+                    got += len(chunk)
+                    if got >= SLICE_BYTES:
+                        break
+                    if got % (25 << 20) < (1 << 20):
+                        print(f"  {got / 1e6:.0f}MB", flush=True)
+    except (requests.exceptions.ChunkedEncodingError,
+            requests.exceptions.ConnectionError):
+        # Some mirrors report Content-Length for the full file but we abort
+        # after the slice. That's fine — we got what we need.
+        pass
     print(f"done, {got / 1e6:.0f}MB")
 
 
@@ -66,13 +76,15 @@ def main():
     global VOCAB_SIZE
     ap = argparse.ArgumentParser()
     ap.add_argument("--vocab", type=int, default=4096)
+    ap.add_argument("--mirror", choices=list(MIRRORS.keys()), default="hf",
+                    help="Download mirror: hf (HuggingFace) or modelscope (recommended in China)")
     args = ap.parse_args()
     VOCAB_SIZE = args.vocab
     # vocab 4096 keeps the original train.bin/val.bin; others get suffixed names
     # so both datasets coexist and train.py can pick by --vocab.
     suffix = "" if VOCAB_SIZE == 4096 else f"_v{VOCAB_SIZE}"
 
-    download()
+    download(MIRRORS[args.mirror])
     with open(RAW, "r", encoding="utf-8", errors="ignore") as f:
         text = f.read()
     # Drop the trailing partial story left by the byte-slice.
