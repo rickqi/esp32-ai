@@ -16,6 +16,22 @@
   - 本草（结构化 QA）+ HuatuoGPT2（多轮对话）来自**不同生成方**，指令分布互补，可提升模型对未见问题的泛化
   - 实验依据：v1 曾因数据同质化（模板/单源）导致问答能力弱，多源混合是已验证的改进方向
 - 数据路径: `data_v2/raw/benchao/` + `data_v2/raw/huatuogpt2/`
+### 2026-08-01: 设备端 CJK 显示 + v2 推理根因修复
+- ✅ **RLCD 中文显示**: 从 XiaoZhi `font_noto_qwen_14_1.bin` 提取 7854 个 14×14 1bpp 字形
+  （GB2312 汉字覆盖 98.71%，含全部医疗生僻字 腺/癌/龋/颧/癃 等），生成 `cjk_font.h`
+- ✅ **display.h CJK 渲染**: UTF-8 3 字节解码 → 二分查找 CJK_CP → 14×14 字形渲染，
+  缺字显示 □；prompt 2x 区支持中文；生成光标(2px 竖条) + 生成后清除
+- ✅ **v2 固件完整化**: `esp32_llm_zh_v2/` 补齐 display.h/display_bsp/cjk_font/ino，
+  vocab.h 用 v2(6594)，DEMO_PROMPT_IDS 适配 v2 词表(285/995/1186)
+- ✅ **repetition penalty**: 固件采样加入 rep-penalty(1.3)+ 历史窗口(50)，
+  抑制小模型重复循环（v1/v2 同步）
+- 🔧 **v2 推理 NaN 根因修复**: `chinese/export.py` 调用 `quant_pack(t)` 未传 group，
+  默认用了 src 的 GROUP=128 但文件头写 32 → 布局错位 → C 端 NaN → 生成退化
+  （"痞痞痞..."块循环）。修复为 `quant_pack(t, group=GROUP)`
+- ✅ **C 端验证**: WSL 重导出 model.bin 7.71MB，verify.c PASS（max abs diff 0.00001）
+- ✅ **端侧实测**: 医学 prompt 生成有意义中文（"喑是很正常人"），无 NaN 块循环
+- ✅ **防御性修复**: export.py/quantize.py 增加 NaN/Inf 清零；verify.c probe 越界修复
+- 提交: (本批次) (feat: RLCD CJK display (7854 glyphs) + v2 firmware + fix v2 NaN root cause (group param))
 
 ### 2026-08-01: 部署验证 + NaN 防护
 - ✅ model.bin 7.10MB / PSRAM 3.73MB / vocab 6,594 全部通过部署检查

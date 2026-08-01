@@ -115,8 +115,19 @@ def main():
     dq_sd = {k: v.clone() for k, v in sd.items()}
     blobs = []
     for name, t, quant in plan:
+        # NaN/Inf cleanup: unused vocab rows (e.g. untrained token embeddings) can
+        # carry NaN, which quantizes into NaN fp16 scales and poisons on-device
+        # inference (observed: model_v2 tok_emb had 276 NaN scales -> block loops).
+        if torch.isnan(t).any() or torch.isinf(t).any():
+            print(f"  cleanup NaN/Inf in {name}: {torch.isnan(t).sum().item()} NaN, "
+                  f"{torch.isinf(t).sum().item()} Inf")
+            t = torch.nan_to_num(t, nan=0.0, posinf=0.0, neginf=0.0)
         if quant:
-            packed, scales, dq = quant_pack(t)
+            # NOTE: must pass group=GROUP explicitly -- src/export.py's quant_pack
+            # defaults to its own GROUP=128, which would pack with the wrong
+            # group size vs the 32 written to the header, corrupting the layout
+            # (C side then misparses scales -> NaN on device).
+            packed, scales, dq = quant_pack(t, group=GROUP)
             dq_sd[name] = dq
             blobs.append(("Q", name, t.shape, packed, scales))
         else:

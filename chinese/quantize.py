@@ -71,6 +71,12 @@ def quantize_model(model, bits=4, group=64, quant_table=True, fp16_scales=False)
                 continue
             if "table" in name and not quant_table:
                 continue
+            # NaN/Inf cleanup: untrained token-embedding rows carry NaN, which
+            # quantize_groupwise turns into NaN scales (clamp_min can't fix NaN).
+            # Clean before quantizing so the PPL estimate reflects the real model.
+            if torch.isnan(p).any() or torch.isinf(p).any():
+                print(f"  cleanup NaN/Inf in {name}")
+                p.data = torch.nan_to_num(p.data, nan=0.0, posinf=0.0, neginf=0.0)
             p.copy_(quantize_groupwise(p.data, bits, group, fp16_scales))
             n_q += p.numel()
     return n_q

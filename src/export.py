@@ -108,6 +108,13 @@ def main():
     dq_sd = {k: v.clone() for k, v in sd.items()}
     blobs = []
     for name, t, quant in plan:
+        # NaN/Inf cleanup: unused vocab rows (untrained token embeddings) can carry
+        # NaN, which quantizes into NaN fp16 scales and poisons on-device inference
+        # (observed on the Chinese zh5-med model: 276 NaN scales -> block loops).
+        if torch.isnan(t).any() or torch.isinf(t).any():
+            print(f"  cleanup NaN/Inf in {name}: {torch.isnan(t).sum().item()} NaN, "
+                  f"{torch.isinf(t).sum().item()} Inf")
+            t = torch.nan_to_num(t, nan=0.0, posinf=0.0, neginf=0.0)
         if quant:
             packed, scales, dq = quant_pack(t)
             dq_sd[name] = dq

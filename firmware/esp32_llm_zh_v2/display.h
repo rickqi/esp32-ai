@@ -1,0 +1,750 @@
+// Optional on-device screen for the demo: the story appears on a display wired
+// to the ESP32 itself, no laptop. Two panels supported via DISPLAY_KIND:
+//
+//   DISPLAY_OLED_I2C (default) -- 128x64 I2C mono OLED. 4 wires:
+//     GND->GND, VCC->3V3, SCL->GPIO46, SDA->GPIO18. Set OLED_CONTROLLER to match
+//     the panel: 1.3" is usually SH1106, 0.96" usually SSD1306. Wrong choice ->
+//     top row correct, rest noise (SH1106-as-SSD1306) -> flip the define.
+//   DISPLAY_TFT_SPI -- 2.0" 240x320 SPI ST7789 (GMT020-02-7P). Wiring in the TFT
+//     block below. Nicer color hero shot for later.
+//
+// The API (display_begin / display_puts) is identical for both, so the sketch
+// integration never changes -- only this header and the wiring.
+#ifndef DISPLAY_H
+#define DISPLAY_H
+
+#define DISPLAY_OLED_I2C 1
+#define DISPLAY_TFT_SPI  2
+#define DISPLAY_RLCD_ST7305 3
+#ifndef DISPLAY_KIND
+#define DISPLAY_KIND DISPLAY_RLCD_ST7305
+#endif
+
+// ==================== 128x64 I2C OLED (SH1106 or SSD1306) ===================
+#if DISPLAY_KIND == DISPLAY_OLED_I2C
+#include <Adafruit_GFX.h>
+#include <Wire.h>
+
+// Set to match the panel you wired: 1.3" is usually SH1106, 0.96" usually SSD1306.
+// Wrong choice -> shifted/garbled image; just switch this and reflash.
+#define OLED_SH1106  1
+#define OLED_SSD1306 2
+#ifndef OLED_CONTROLLER
+#define OLED_CONTROLLER OLED_SH1106
+#endif
+
+#define OLED_SDA 18
+#define OLED_SCL 46
+#define OLED_ADDR 0x3C          // some panels are 0x3D
+#define SCR_W 128
+#define SCR_H 64
+#define CW 6                    // 6x8 base glyph at text size 1
+#define CH 8
+
+#if OLED_CONTROLLER == OLED_SH1106
+#include <Adafruit_SH110X.h>
+static Adafruit_SH1106G oled = Adafruit_SH1106G(SCR_W, SCR_H, &Wire, -1);
+#define OLED_WHITE SH110X_WHITE
+#else
+#include <Adafruit_SSD1306.h>
+static Adafruit_SSD1306 oled = Adafruit_SSD1306(SCR_W, SCR_H, &Wire, -1);
+#define OLED_WHITE SSD1306_WHITE
+#endif
+
+static int ox = 0, oy = 0;
+
+static void display_home() {
+  oled.clearDisplay();
+  ox = 0; oy = 0;
+}
+
+static void display_begin() {
+  Wire.begin(OLED_SDA, OLED_SCL);
+  Wire.setClock(400000);   // 400kHz fast I2C -> ~4x quicker frame flush than default
+#if OLED_CONTROLLER == OLED_SH1106
+  oled.begin(OLED_ADDR, true);
+#else
+  oled.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
+#endif
+  oled.clearDisplay();
+  oled.setTextSize(1);
+  oled.setTextColor(OLED_WHITE);
+  oled.setTextWrap(false);      // we wrap at token boundaries ourselves
+  oled.display();
+  display_home();
+}
+
+// Append a token's bytes; whole-token wrap, clear+home when the screen fills,
+// flush the framebuffer once per token so text visibly appears.
+static void display_puts(const unsigned char *s, int len) {
+  if (ox + len * CW > SCR_W) { oy += CH; ox = 0; }
+  if (oy + CH > SCR_H) display_home();
+  for (int i = 0; i < len; i++) {
+    char c = (char)s[i];
+    if (c == '\n') { oy += CH; ox = 0; }
+    else if (c >= 32 && c < 127) {
+      if (ox + CW > SCR_W) { oy += CH; ox = 0; }
+      if (oy + CH > SCR_H) display_home();
+      oled.setCursor(ox, oy);
+      oled.write(c);
+      ox += CW;
+    }
+    if (oy + CH > SCR_H) display_home();
+  }
+  oled.display();
+}
+
+// Closing stats card shown when generation finishes.
+static void display_stats(float tok_s, float ms) {
+  oled.clearDisplay();
+  oled.setTextColor(OLED_WHITE);
+  oled.setTextSize(1);
+  oled.setCursor(0, 0);  oled.print("ESP32-S3  PLE LLM");
+  oled.setCursor(0, 14); oled.print("28.9M params");
+  oled.setCursor(0, 24); oled.print("in 320KB of RAM");
+  oled.setTextSize(2);
+  oled.setCursor(0, 40); oled.print(tok_s, 1); oled.print(" tok/s");
+  oled.setTextSize(1);
+  oled.setCursor(0, 57); oled.print(ms, 0); oled.print(" ms/token");
+  oled.display();
+}
+
+// ======================= 2.0" SPI TFT (ST7789) ==============================
+#elif DISPLAY_KIND == DISPLAY_TFT_SPI
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7789.h>
+#include <SPI.h>
+
+#define TFT_CS 10
+#define TFT_DC 7
+#define TFT_RST 6
+#define TFT_SCK 12
+#define TFT_MOSI 11
+#define TFT_W 240
+#define TFT_H 320
+#define TFT_TEXTSIZE 2
+#define CHAR_W (6 * TFT_TEXTSIZE)
+#define CHAR_H (8 * TFT_TEXTSIZE)
+#define LINE_H (CHAR_H + 2)
+
+static Adafruit_ST7789 tft = Adafruit_ST7789(&SPI, TFT_CS, TFT_DC, TFT_RST);
+
+static void display_home() {
+  tft.fillScreen(ST77XX_BLACK);
+  tft.setCursor(2, 2);
+}
+
+static void display_begin() {
+  SPI.begin(TFT_SCK, -1, TFT_MOSI, TFT_CS);
+  tft.init(TFT_W, TFT_H);
+  tft.setRotation(0);
+  tft.setTextSize(TFT_TEXTSIZE);
+  tft.setTextColor(ST77XX_GREEN, ST77XX_BLACK);
+  tft.setTextWrap(false);
+  display_home();
+}
+
+static void display_puts(const unsigned char *s, int len) {
+  if (tft.getCursorX() + len * CHAR_W > TFT_W)
+    tft.setCursor(2, tft.getCursorY() + LINE_H);
+  if (tft.getCursorY() + LINE_H > TFT_H)
+    display_home();
+  for (int i = 0; i < len; i++) {
+    char c = (char)s[i];
+    if (c == '\n') {
+      tft.setCursor(2, tft.getCursorY() + LINE_H);
+    } else if (c >= 32 && c < 127) {
+      if (tft.getCursorX() + CHAR_W > TFT_W)
+        tft.setCursor(2, tft.getCursorY() + LINE_H);
+      tft.write(c);
+    }
+    if (tft.getCursorY() + LINE_H > TFT_H)
+      display_home();
+  }
+}
+
+// Closing stats card shown when generation finishes.
+static void display_stats(float tok_s, float ms) {
+  tft.fillScreen(ST77XX_BLACK);
+  tft.setTextColor(ST77XX_GREEN, ST77XX_BLACK);
+  tft.setTextSize(2);
+  tft.setCursor(4, 10);  tft.print("ESP32-S3");
+  tft.setCursor(4, 40);  tft.print("PLE TinyLM");
+  tft.setCursor(4, 90);  tft.print("28.9M params");
+  tft.setCursor(4, 120); tft.print("in 320KB RAM");
+  tft.setTextSize(3);
+  tft.setCursor(4, 170); tft.print(tok_s, 1); tft.print(" t/s");
+  tft.setTextSize(2);
+  tft.setCursor(4, 220); tft.print(ms, 0); tft.print(" ms/token");
+}
+
+// ============== 4.2" RLCD ST7305 (Waveshare ESP32-S3-RLCD-4.2) ===============
+#elif DISPLAY_KIND == DISPLAY_RLCD_ST7305
+
+#include <stdio.h>
+#include <time.h>
+#include <esp_timer.h>
+#include "display_bsp.h"
+#include "cjk_font.h"   // 14x14 1bpp CJK glyphs (GB2312 ~98.7%)
+
+// 5x7 bitmap font (Adafruit GFX classic glcdfont, public domain).
+// Indexed as font[ascii * 5 + col]; each byte: bit0 = top row.
+static const uint8_t RLCD_FONT[] = {
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x3E, 0x5B, 0x4F, 0x5B, 0x3E,
+  0x3E, 0x6B, 0x4F, 0x6B, 0x3E, 0x1C, 0x3E, 0x7C, 0x3E, 0x1C,
+  0x18, 0x3C, 0x7E, 0x3C, 0x18, 0x1C, 0x57, 0x7D, 0x57, 0x1C,
+  0x1C, 0x5E, 0x7F, 0x5E, 0x1C, 0x00, 0x18, 0x3C, 0x18, 0x00,
+  0xFF, 0xE7, 0xC3, 0xE7, 0xFF, 0x00, 0x18, 0x24, 0x18, 0x00,
+  0xFF, 0xE7, 0xDB, 0xE7, 0xFF, 0x30, 0x48, 0x3A, 0x06, 0x0E,
+  0x26, 0x29, 0x79, 0x29, 0x26, 0x40, 0x7F, 0x05, 0x05, 0x07,
+  0x40, 0x7F, 0x05, 0x25, 0x3F, 0x5A, 0x3C, 0xE7, 0x3C, 0x5A,
+  0x7F, 0x3E, 0x1C, 0x1C, 0x08, 0x08, 0x1C, 0x1C, 0x3E, 0x7F,
+  0x14, 0x22, 0x7F, 0x22, 0x14, 0x5F, 0x5F, 0x00, 0x5F, 0x5F,
+  0x06, 0x09, 0x7F, 0x01, 0x7F, 0x00, 0x66, 0x89, 0x95, 0x6A,
+  0x60, 0x60, 0x60, 0x60, 0x60, 0x94, 0xA2, 0xFF, 0xA2, 0x94,
+  0x08, 0x04, 0x7E, 0x04, 0x08, 0x10, 0x20, 0x7E, 0x20, 0x10,
+  0x08, 0x08, 0x2A, 0x1C, 0x08, 0x08, 0x1C, 0x2A, 0x08, 0x08,
+  0x1E, 0x10, 0x10, 0x10, 0x10, 0x0C, 0x1E, 0x0C, 0x1E, 0x0C,
+  0x30, 0x38, 0x3E, 0x38, 0x30, 0x06, 0x0E, 0x3E, 0x0E, 0x06,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x5F, 0x00, 0x00,
+  0x00, 0x07, 0x00, 0x07, 0x00, 0x14, 0x7F, 0x14, 0x7F, 0x14,
+  0x24, 0x2A, 0x7F, 0x2A, 0x12, 0x23, 0x13, 0x08, 0x64, 0x62,
+  0x36, 0x49, 0x56, 0x20, 0x50, 0x00, 0x08, 0x07, 0x03, 0x00,
+  0x00, 0x1C, 0x22, 0x41, 0x00, 0x00, 0x41, 0x22, 0x1C, 0x00,
+  0x2A, 0x1C, 0x7F, 0x1C, 0x2A, 0x08, 0x08, 0x3E, 0x08, 0x08,
+  0x00, 0x80, 0x70, 0x30, 0x00, 0x08, 0x08, 0x08, 0x08, 0x08,
+  0x00, 0x00, 0x60, 0x60, 0x00, 0x20, 0x10, 0x08, 0x04, 0x02,
+  0x3E, 0x51, 0x49, 0x45, 0x3E, 0x00, 0x42, 0x7F, 0x40, 0x00,
+  0x72, 0x49, 0x49, 0x49, 0x46, 0x21, 0x41, 0x49, 0x4D, 0x33,
+  0x18, 0x14, 0x12, 0x7F, 0x10, 0x27, 0x45, 0x45, 0x45, 0x39,
+  0x3C, 0x4A, 0x49, 0x49, 0x31, 0x41, 0x21, 0x11, 0x09, 0x07,
+  0x36, 0x49, 0x49, 0x49, 0x36, 0x46, 0x49, 0x49, 0x29, 0x1E,
+  0x00, 0x00, 0x14, 0x00, 0x00, 0x00, 0x40, 0x34, 0x00, 0x00,
+  0x00, 0x08, 0x14, 0x22, 0x41, 0x14, 0x14, 0x14, 0x14, 0x14,
+  0x00, 0x41, 0x22, 0x14, 0x08, 0x02, 0x01, 0x59, 0x09, 0x06,
+  0x3E, 0x41, 0x5D, 0x59, 0x4E, 0x7C, 0x12, 0x11, 0x12, 0x7C,
+  0x7F, 0x49, 0x49, 0x49, 0x36, 0x3E, 0x41, 0x41, 0x41, 0x22,
+  0x7F, 0x41, 0x41, 0x41, 0x3E, 0x7F, 0x49, 0x49, 0x49, 0x41,
+  0x7F, 0x09, 0x09, 0x09, 0x01, 0x3E, 0x41, 0x41, 0x51, 0x73,
+  0x7F, 0x08, 0x08, 0x08, 0x7F, 0x00, 0x41, 0x7F, 0x41, 0x00,
+  0x20, 0x40, 0x41, 0x3F, 0x01, 0x7F, 0x08, 0x14, 0x22, 0x41,
+  0x7F, 0x40, 0x40, 0x40, 0x40, 0x7F, 0x02, 0x1C, 0x02, 0x7F,
+  0x7F, 0x04, 0x08, 0x10, 0x7F, 0x3E, 0x41, 0x41, 0x41, 0x3E,
+  0x7F, 0x09, 0x09, 0x09, 0x06, 0x3E, 0x41, 0x51, 0x21, 0x5E,
+  0x7F, 0x09, 0x19, 0x29, 0x46, 0x26, 0x49, 0x49, 0x49, 0x32,
+  0x03, 0x01, 0x7F, 0x01, 0x03, 0x3F, 0x40, 0x40, 0x40, 0x3F,
+  0x1F, 0x20, 0x40, 0x20, 0x1F, 0x3F, 0x40, 0x38, 0x40, 0x3F,
+  0x63, 0x14, 0x08, 0x14, 0x63, 0x03, 0x04, 0x78, 0x04, 0x03,
+  0x61, 0x59, 0x49, 0x4D, 0x43, 0x00, 0x7F, 0x41, 0x41, 0x41,
+  0x02, 0x04, 0x08, 0x10, 0x20, 0x00, 0x41, 0x41, 0x41, 0x7F,
+  0x04, 0x02, 0x01, 0x02, 0x04, 0x40, 0x40, 0x40, 0x40, 0x40,
+  0x00, 0x03, 0x07, 0x08, 0x00, 0x20, 0x54, 0x54, 0x78, 0x40,
+  0x7F, 0x28, 0x44, 0x44, 0x38, 0x38, 0x44, 0x44, 0x44, 0x28,
+  0x38, 0x44, 0x44, 0x28, 0x7F, 0x38, 0x54, 0x54, 0x54, 0x18,
+  0x00, 0x08, 0x7E, 0x09, 0x02, 0x18, 0xA4, 0xA4, 0x9C, 0x78,
+  0x7F, 0x08, 0x04, 0x04, 0x78, 0x00, 0x44, 0x7D, 0x40, 0x00,
+  0x20, 0x40, 0x40, 0x3D, 0x00, 0x7F, 0x10, 0x28, 0x44, 0x00,
+  0x00, 0x41, 0x7F, 0x40, 0x00, 0x7C, 0x04, 0x78, 0x04, 0x78,
+  0x7C, 0x08, 0x04, 0x04, 0x78, 0x38, 0x44, 0x44, 0x44, 0x38,
+  0xFC, 0x18, 0x24, 0x24, 0x18, 0x18, 0x24, 0x24, 0x18, 0xFC,
+  0x7C, 0x08, 0x04, 0x04, 0x08, 0x48, 0x54, 0x54, 0x54, 0x24,
+  0x04, 0x04, 0x3F, 0x44, 0x24, 0x3C, 0x40, 0x40, 0x20, 0x7C,
+  0x1C, 0x20, 0x40, 0x20, 0x1C, 0x3C, 0x40, 0x30, 0x40, 0x3C,
+  0x44, 0x28, 0x10, 0x28, 0x44, 0x4C, 0x90, 0x90, 0x90, 0x7C,
+  0x44, 0x64, 0x54, 0x4C, 0x44, 0x00, 0x08, 0x36, 0x41, 0x00,
+  0x00, 0x00, 0x77, 0x00, 0x00, 0x00, 0x41, 0x36, 0x08, 0x00,
+  0x02, 0x01, 0x02, 0x04, 0x02, 0x3C, 0x26, 0x23, 0x26, 0x3C,
+  0x1E, 0xA1, 0xA1, 0x61, 0x12, 0x3A, 0x40, 0x40, 0x20, 0x7A,
+  0x38, 0x54, 0x54, 0x55, 0x59, 0x21, 0x55, 0x55, 0x79, 0x41,
+  0x22, 0x54, 0x54, 0x78, 0x42, 0x21, 0x55, 0x54, 0x78, 0x40,
+  0x20, 0x54, 0x55, 0x79, 0x40, 0x0C, 0x1E, 0x52, 0x72, 0x12,
+  0x39, 0x55, 0x55, 0x55, 0x59, 0x39, 0x54, 0x54, 0x54, 0x59,
+  0x39, 0x55, 0x54, 0x54, 0x58, 0x00, 0x00, 0x45, 0x7C, 0x41,
+  0x00, 0x02, 0x45, 0x7D, 0x42, 0x00, 0x01, 0x45, 0x7C, 0x40,
+  0x7D, 0x12, 0x11, 0x12, 0x7D, 0xF0, 0x28, 0x25, 0x28, 0xF0,
+  0x7C, 0x54, 0x55, 0x45, 0x00, 0x20, 0x54, 0x54, 0x7C, 0x54,
+  0x7C, 0x0A, 0x09, 0x7F, 0x49, 0x32, 0x49, 0x49, 0x49, 0x32,
+  0x3A, 0x44, 0x44, 0x44, 0x3A, 0x32, 0x4A, 0x48, 0x48, 0x30,
+  0x3A, 0x41, 0x41, 0x21, 0x7A, 0x3A, 0x42, 0x40, 0x20, 0x78,
+  0x00, 0x9D, 0xA0, 0xA0, 0x7D, 0x3D, 0x42, 0x42, 0x42, 0x3D,
+  0x3D, 0x40, 0x40, 0x40, 0x3D, 0x3C, 0x24, 0xFF, 0x24, 0x24,
+  0x48, 0x7E, 0x49, 0x43, 0x66, 0x2B, 0x2F, 0xFC, 0x2F, 0x2B,
+  0xFF, 0x09, 0x29, 0xF6, 0x20, 0xC0, 0x88, 0x7E, 0x09, 0x03,
+  0x20, 0x54, 0x54, 0x79, 0x41, 0x00, 0x00, 0x44, 0x7D, 0x41,
+  0x30, 0x48, 0x48, 0x4A, 0x32, 0x38, 0x40, 0x40, 0x22, 0x7A,
+  0x00, 0x7A, 0x0A, 0x0A, 0x72, 0x7D, 0x0D, 0x19, 0x31, 0x7D,
+  0x26, 0x29, 0x29, 0x2F, 0x28, 0x26, 0x29, 0x29, 0x29, 0x26,
+  0x30, 0x48, 0x4D, 0x40, 0x20, 0x38, 0x08, 0x08, 0x08, 0x08,
+  0x08, 0x08, 0x08, 0x08, 0x38, 0x2F, 0x10, 0xC8, 0xAC, 0xBA,
+  0x2F, 0x10, 0x28, 0x34, 0xFA, 0x00, 0x00, 0x7B, 0x00, 0x00,
+  0x08, 0x14, 0x2A, 0x14, 0x22, 0x22, 0x14, 0x2A, 0x14, 0x08,
+  0x55, 0x00, 0x55, 0x00, 0x55, 0xAA, 0x55, 0xAA, 0x55, 0xAA,
+  0xFF, 0x55, 0xFF, 0x55, 0xFF, 0x00, 0x00, 0x00, 0xFF, 0x00,
+  0x10, 0x10, 0x10, 0xFF, 0x00, 0x14, 0x14, 0x14, 0xFF, 0x00,
+  0x10, 0x10, 0xFF, 0x00, 0xFF, 0x10, 0x10, 0xF0, 0x10, 0xF0,
+  0x14, 0x14, 0x14, 0xFC, 0x00, 0x14, 0x14, 0xF7, 0x00, 0xFF,
+  0x00, 0x00, 0xFF, 0x00, 0xFF, 0x14, 0x14, 0xF4, 0x04, 0xFC,
+  0x14, 0x14, 0x17, 0x10, 0x1F, 0x10, 0x10, 0x1F, 0x10, 0x1F,
+  0x14, 0x14, 0x14, 0x1F, 0x00, 0x10, 0x10, 0x10, 0xF0, 0x00,
+  0x00, 0x00, 0x00, 0x1F, 0x10, 0x10, 0x10, 0x10, 0x1F, 0x10,
+  0x10, 0x10, 0x10, 0xF0, 0x10, 0x00, 0x00, 0x00, 0xFF, 0x10,
+  0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0xFF, 0x10,
+  0x00, 0x00, 0x00, 0xFF, 0x14, 0x00, 0x00, 0xFF, 0x00, 0xFF,
+  0x00, 0x00, 0x1F, 0x10, 0x17, 0x00, 0x00, 0xFC, 0x04, 0xF4,
+  0x14, 0x14, 0x17, 0x10, 0x17, 0x14, 0x14, 0xF4, 0x04, 0xF4,
+  0x00, 0x00, 0xFF, 0x00, 0xF7, 0x14, 0x14, 0x14, 0x14, 0x14,
+  0x14, 0x14, 0xF7, 0x00, 0xF7, 0x14, 0x14, 0x14, 0x17, 0x14,
+  0x10, 0x10, 0x1F, 0x10, 0x1F, 0x14, 0x14, 0x14, 0xF4, 0x14,
+  0x10, 0x10, 0xF0, 0x10, 0xF0, 0x00, 0x00, 0x1F, 0x10, 0x1F,
+  0x00, 0x00, 0x00, 0x1F, 0x14, 0x00, 0x00, 0x00, 0xFC, 0x14,
+  0x00, 0x00, 0xF0, 0x10, 0xF0, 0x10, 0x10, 0xFF, 0x10, 0xFF,
+  0x14, 0x14, 0x14, 0xFF, 0x14, 0x10, 0x10, 0x10, 0x1F, 0x00,
+  0x00, 0x00, 0x00, 0xF0, 0x10, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+  0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xFF, 0xFF, 0xFF, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0xFF, 0xFF, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F,
+  0x38, 0x44, 0x44, 0x38, 0x44, 0xFC, 0x4A, 0x4A, 0x4A, 0x34,
+  0x7E, 0x02, 0x02, 0x06, 0x06, 0x02, 0x7E, 0x02, 0x7E, 0x02,
+  0x63, 0x55, 0x49, 0x41, 0x63, 0x38, 0x44, 0x44, 0x3C, 0x04,
+  0x40, 0x7E, 0x20, 0x1E, 0x20, 0x06, 0x02, 0x7E, 0x02, 0x02,
+  0x99, 0xA5, 0xE7, 0xA5, 0x99, 0x1C, 0x2A, 0x49, 0x2A, 0x1C,
+  0x4C, 0x72, 0x01, 0x72, 0x4C, 0x30, 0x4A, 0x4D, 0x4D, 0x30,
+  0x30, 0x48, 0x78, 0x48, 0x30, 0xBC, 0x62, 0x5A, 0x46, 0x3D,
+  0x3E, 0x49, 0x49, 0x49, 0x00, 0x7E, 0x01, 0x01, 0x01, 0x7E,
+  0x2A, 0x2A, 0x2A, 0x2A, 0x2A, 0x44, 0x44, 0x5F, 0x44, 0x44,
+  0x40, 0x51, 0x4A, 0x44, 0x40, 0x40, 0x44, 0x4A, 0x51, 0x40,
+  0x00, 0x00, 0xFF, 0x01, 0x03, 0xE0, 0x80, 0xFF, 0x00, 0x00,
+  0x08, 0x08, 0x6B, 0x6B, 0x08, 0x36, 0x12, 0x36, 0x24, 0x36,
+  0x06, 0x0F, 0x09, 0x0F, 0x06, 0x00, 0x00, 0x18, 0x18, 0x00,
+  0x00, 0x00, 0x10, 0x10, 0x00, 0x30, 0x40, 0xFF, 0x01, 0x01,
+  0x00, 0x1F, 0x01, 0x01, 0x1E, 0x00, 0x19, 0x1D, 0x17, 0x12,
+  0x00, 0x3C, 0x3C, 0x3C, 0x3C, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+
+#define SCR_W 400
+#define SCR_H 300
+#define CW 6
+#define CH 8
+#define BORDER_W   2     // border frame width in pixels (thick enough to be visible)
+#define TUI_LEFT   1
+#define TUI_RIGHT  (SCR_W - 1 - BORDER_W)  // 397
+#define TUI_TOP    1
+#define TUI_BOT    (SCR_H - 1 - BORDER_W)  // 297
+#define TEXT_LEFT  (TUI_LEFT + BORDER_W + 4)   // = 7,  4px padding inside border
+#define TEXT_RIGHT (TUI_RIGHT - BORDER_W - 3)  // = 392, 3px padding inside right border
+
+static DisplayPort *rlcd = nullptr;
+static int ox = 0, oy = 0;
+
+// Draw one 5x7 glyph at (x,y) into the ST7305 framebuffer (black on white).
+static void rlcd_draw_char(int x, int y, unsigned char c) {
+  const uint8_t *g = &RLCD_FONT[(unsigned)c * 5];
+  for (int col = 0; col < 5; col++) {
+    uint8_t bits = g[col];
+    for (int row = 0; row < 8; row++) {
+      if (bits & (1 << row))
+        rlcd->RLCD_SetPixel(x + col, y + row, ColorBlack);
+    }
+  }
+}
+
+// ---- CJK rendering (UTF-8 decode + 14x14 glyph lookup) ---------------------
+// Decode one UTF-8 sequence at s[0..len).  Returns the codepoint and stores the
+// consumed byte count in *consumed (1..3).  Returns -1 on invalid lead byte.
+static int utf8_decode(const unsigned char *s, int len, int *consumed) {
+  unsigned char b0 = s[0];
+  if (b0 < 0x80) { *consumed = 1; return b0; }
+  if ((b0 & 0xE0) == 0xC0 && len >= 2) {
+    *consumed = 2;
+    return ((b0 & 0x1F) << 6) | (s[1] & 0x3F);
+  }
+  if ((b0 & 0xF0) == 0xE0 && len >= 3) {
+    *consumed = 3;
+    return ((b0 & 0x0F) << 12) | ((s[1] & 0x3F) << 6) | (s[2] & 0x3F);
+  }
+  *consumed = 1;   // treat as invalid single byte, caller skips it
+  return -1;
+}
+
+// Binary search CJK_CP (sorted ascending) -> index into CJK_OFF/CJK_BLOB, or -1.
+static int cjk_find(int cp) {
+  int lo = 0, hi = CJK_N - 1;
+  while (lo <= hi) {
+    int mid = (lo + hi) >> 1;
+    if (CJK_CP[mid] < cp) lo = mid + 1;
+    else if (CJK_CP[mid] > cp) hi = mid - 1;
+    else return mid;
+  }
+  return -1;
+}
+
+// Draw one 14x14 CJK glyph at (x,y).  Missing chars -> hollow square (□).
+static void rlcd_draw_cjk(int x, int y, int cp) {
+  int idx = cjk_find(cp);
+  if (idx < 0) {   // missing glyph: 2px border box
+    for (int i = 0; i < CJK_W; i++) {
+      rlcd->RLCD_SetPixel(x + i, y, ColorBlack);
+      rlcd->RLCD_SetPixel(x + i, y + CJK_H - 1, ColorBlack);
+    }
+    for (int j = 0; j < CJK_H; j++) {
+      rlcd->RLCD_SetPixel(x, y + j, ColorBlack);
+      rlcd->RLCD_SetPixel(x + CJK_W - 1, y + j, ColorBlack);
+    }
+    return;
+  }
+  const uint8_t *g = &CJK_BLOB[CJK_OFF[idx]];
+  for (int row = 0; row < CJK_H; row++) {
+    for (int col = 0; col < CJK_W; col++) {
+      if (g[row * 2 + col / 8] & (0x80 >> (col % 8)))
+        rlcd->RLCD_SetPixel(x + col, y + row, ColorBlack);
+    }
+  }
+}
+
+// Draw a C string starting at (x,y); handles '\n'.
+static void rlcd_draw_text(int x, int y, const char *s) {
+  int cx = x, cy = y;
+  while (*s) {
+    char c = *s++;
+    if (c == '\n') { cy += CH; cx = x; }
+    else if (c >= 32 && c < 127) {
+      rlcd_draw_char(cx, cy, (unsigned char)c);
+      cx += CW;
+    }
+  }
+}
+
+static void display_home() {
+  rlcd->RLCD_ColorClear(ColorWhite);
+  ox = 0; oy = 0;
+}
+
+static void display_begin() {
+  rlcd = new DisplayPort(12, 11, 5, 40, 41, 400, 300);
+  rlcd->RLCD_Init();
+  rlcd->RLCD_ColorClear(ColorWhite);
+  rlcd->RLCD_Display();
+  display_home();
+}
+
+// ---- Output area boundaries (3-zone TUI: header / output / footer) ---------
+static int out_top = 0;          // first usable row for text output
+static int out_bottom = SCR_H;   // exclusive bottom boundary
+
+// Clear a rectangle to white (erase pixels).
+static void rlcd_clear_rect(int x0, int y0, int x1, int y1) {
+  for (int y = y0; y <= y1; y++) for (int x = x0; x <= x1; x++) rlcd->RLCD_SetPixel(x, y, ColorWhite);
+}
+
+// Confine text output to rows [top, bottom).  Call before generation starts.
+static void display_set_output_area(int top, int bottom) { out_top = top; out_bottom = bottom; }
+
+// Clear only the output area and reset cursor to its top.
+static void display_clear_output() {
+  rlcd_clear_rect(TEXT_LEFT, out_top, TEXT_RIGHT, out_bottom - 1);
+  ox = TEXT_LEFT; oy = out_top;
+}
+
+// Erase the 2px generation cursor that display_draw_cursor() would draw at
+// (x,y).  Called by display_puts() BEFORE drawing a character (the character
+// would not always cover the cursor, e.g. spaces / full-width blank glyphs)
+// and on line-wrap (a wrapped line would otherwise leave the old line's
+// trailing cursor behind).
+static void rlcd_erase_cursor(int x, int y) {
+  if (x < TEXT_LEFT) x = TEXT_LEFT;
+  if (y < out_top) y = out_top;
+  for (int yy = y; yy < y + CJK_H && yy < out_bottom; yy++)
+    for (int xx = x; xx < x + 2; xx++)
+      if (xx < TEXT_RIGHT) rlcd->RLCD_SetPixel(xx, yy, ColorWhite);
+}
+
+// Text rendering with wrapping confined to [out_top, out_bottom).
+// UTF-8 aware: ASCII uses the 5x7 font (vertically centered), CJK uses the
+// 14x14 glyph table.  All rows are CJK_H (14px) tall so mixed ASCII/CJK lines
+// never overlap; missing CJK chars render as a hollow □ box.
+static void display_puts(const unsigned char *s, int len) {
+  int i = 0;
+  while (i < len) {
+    int consumed;
+    int cp = utf8_decode(s + i, len - i, &consumed);
+    if (cp < 0) { i++; continue; }        // invalid byte: skip
+    if (cp == '\n') {
+      rlcd_erase_cursor(ox, oy);          // erase trailing cursor of this line
+      oy += CJK_H; ox = TEXT_LEFT; i += consumed; continue;
+    }
+
+    if (ox + CJK_W > TEXT_RIGHT) {
+      rlcd_erase_cursor(ox, oy);          // line wrap: erase trailing cursor
+      oy += CJK_H; ox = TEXT_LEFT;
+    }
+    if (oy + CJK_H > out_bottom) display_clear_output();
+
+    rlcd_erase_cursor(ox, oy);            // character will overwrite this spot
+
+    if (cp >= 32 && cp < 0x80) {
+      rlcd_draw_char(ox, oy + (CJK_H - CH) / 2, (unsigned char)cp);  // center 8px ASCII in 14px row
+      ox += CW;
+    } else if (cp >= 0x80) {
+      rlcd_draw_cjk(ox, oy, cp);          // missing -> □ box
+      ox += CJK_W;
+    }
+    i += consumed;
+    if (oy + CJK_H > out_bottom) display_clear_output();
+  }
+  rlcd->RLCD_Display();
+}
+
+// Closing stats card shown when generation finishes.
+static void display_stats(float tok_s, float ms) {
+  rlcd->RLCD_ColorClear(ColorWhite);
+  rlcd_draw_text(0, 0,   "ESP32-S3  PLE LLM");
+  rlcd_draw_text(0, 12,  "28.9M params");
+  rlcd_draw_text(0, 24,  "in 320KB of RAM");
+  char buf[32];
+  snprintf(buf, sizeof(buf), "%.1f tok/s", tok_s);
+  rlcd_draw_text(0, 40, buf);
+  snprintf(buf, sizeof(buf), "%.0f ms/token", ms);
+  rlcd_draw_text(0, 52, buf);
+  rlcd->RLCD_Display();
+}
+
+// ---- TUI layout helpers (opencode-inspired) ---------------------------------
+
+// Draw one glyph inverted (white pixel on black background).
+static void rlcd_draw_char_inv(int x, int y, unsigned char c) {
+  const uint8_t *g = &RLCD_FONT[(unsigned)c * 5];
+  for (int col = 0; col < 5; col++) {
+    uint8_t bits = g[col];
+    for (int row = 0; row < 8; row++)
+      if (bits & (1 << row))
+        rlcd->RLCD_SetPixel(x + col, y + row, ColorWhite);
+  }
+}
+
+// Draw inverted text (white on black).
+static void rlcd_draw_text_inv(int x, int y, const char *s) {
+  int cx = x;
+  while (*s) { char c = *s++; if (c >= 32 && c < 127) { rlcd_draw_char_inv(cx, y, (unsigned char)c); cx += CW; } }
+}
+
+// Fill a rectangle black.
+static void rlcd_fill_rect(int x0, int y0, int x1, int y1) {
+  for (int y = y0; y <= y1; y++) for (int x = x0; x <= x1; x++) rlcd->RLCD_SetPixel(x, y, ColorBlack);
+}
+
+// Set the text cursor for subsequent display_puts calls.
+static void display_set_cursor(int x, int y) { ox = x; oy = y; }
+
+// ---- 2x font (each pixel → 2×2 block) for prominent text -------------------
+#define CW2 12   // 2x char cell width  (5*2 + 2 gap)
+#define CH2 14   // 2x char cell height (7*2)
+
+static void rlcd_draw_char_2x(int x, int y, unsigned char c) {
+  const uint8_t *g = &RLCD_FONT[(unsigned)c * 5];
+  for (int col = 0; col < 5; col++) {
+    uint8_t bits = g[col];
+    for (int row = 0; row < 7; row++) {
+      if (bits & (1 << row)) {
+        rlcd->RLCD_SetPixel(x+col*2,   y+row*2,     ColorBlack);
+        rlcd->RLCD_SetPixel(x+col*2+1, y+row*2,     ColorBlack);
+        rlcd->RLCD_SetPixel(x+col*2,   y+row*2+1,   ColorBlack);
+        rlcd->RLCD_SetPixel(x+col*2+1, y+row*2+1,   ColorBlack);
+      }
+    }
+  }
+}
+
+static void rlcd_draw_char_2x_inv(int x, int y, unsigned char c) {
+  const uint8_t *g = &RLCD_FONT[(unsigned)c * 5];
+  for (int col = 0; col < 5; col++) {
+    uint8_t bits = g[col];
+    for (int row = 0; row < 7; row++) {
+      if (bits & (1 << row)) {
+        rlcd->RLCD_SetPixel(x+col*2,   y+row*2,     ColorWhite);
+        rlcd->RLCD_SetPixel(x+col*2+1, y+row*2,     ColorWhite);
+        rlcd->RLCD_SetPixel(x+col*2,   y+row*2+1,   ColorWhite);
+        rlcd->RLCD_SetPixel(x+col*2+1, y+row*2+1,   ColorWhite);
+      }
+    }
+  }
+}
+
+static void rlcd_draw_text_2x(int x, int y, const char *s) {
+  int cx = x;
+  while (*s) { char c = *s++; if (c >= 32 && c < 127) { rlcd_draw_char_2x(cx, y, (unsigned char)c); cx += CW2; } }
+}
+
+static void rlcd_draw_text_2x_inv(int x, int y, const char *s) {
+  int cx = x;
+  while (*s) { char c = *s++; if (c >= 32 && c < 127) { rlcd_draw_char_2x_inv(cx, y, (unsigned char)c); cx += CW2; } }
+}
+
+// ---- Pixel border / frame ---------------------------------------------------
+// Draw a BORDER_W-pixel thick rectangle frame.
+static void rlcd_draw_rect(int x0, int y0, int x1, int y1) {
+  for (int w = 0; w < BORDER_W; w++) {
+    int L = x0 + w, R = x1 - w, T = y0 + w, B = y1 - w;
+    for (int x = L; x <= R; x++) { rlcd->RLCD_SetPixel(x, T, ColorBlack); rlcd->RLCD_SetPixel(x, B, ColorBlack); }
+    for (int y = T; y <= B; y++) { rlcd->RLCD_SetPixel(L, y, ColorBlack); rlcd->RLCD_SetPixel(R, y, ColorBlack); }
+  }
+}
+
+// Draw the full-screen TUI frame with section dividers.
+// Layout: border → header(2x) → div → prompt(2x) → div → output → div → footer → border
+// Layout zone positions (pixel rows).  TUI_* are now computed from BORDER_W above.
+#define HDR_Y1      3     // header row 1: 2x title
+#define HDR_Y2      16
+#define HDR2_Y1     17    // header row 2: 1x sensor strip
+#define HDR2_Y2     26
+#define DIV1_Y      27
+#define PRM_Y       29    // prompt (2x font, 14px tall)
+#define DIV2_Y      45
+#define OUT_Y       47
+#define DIV3_Y      281
+#define FTR_Y1      282
+#define FTR_Y2      293     // end inside the 2px bottom border (y=296-297)
+#define FOOTER_Y    FTR_Y1   // alias for backward compat
+
+static void display_draw_frame() {
+  rlcd_draw_rect(TUI_LEFT, TUI_TOP, TUI_RIGHT, TUI_BOT);
+  rlcd->RLCD_Display();
+}
+
+// ---- small pixel icons ------------------------------------------------------
+// WiFi signal icon (10x8): two arcs + base dot. Draws in ColorBlack.
+static void rlcd_draw_wifi_icon(int x, int y, bool on) {
+  static const uint8_t WIFI[8] = {
+    0b00011000,  //    ##
+    0b00100100,  //   #  #
+    0b01000010,  //  #    #
+    0b00111100,  //   ####
+    0b00000000,
+    0b00011000,  //    ##   base
+    0b00011000,  //    ##
+    0b00000000,
+  };
+  for (int r = 0; r < 8; r++) {
+    uint8_t row = on ? WIFI[r] : 0b00000000;
+    for (int c = 0; c < 8; c++)
+      if (row & (0x80 >> c)) rlcd->RLCD_SetPixel(x + c, y + r, ColorBlack);
+  }
+}
+
+// Battery icon (16x8): outline + fill bar proportional to pct (0-100).
+static void rlcd_draw_battery_icon(int x, int y, int pct) {
+  for (int i = 0; i < 14; i++) { rlcd->RLCD_SetPixel(x+i, y, ColorBlack); rlcd->RLCD_SetPixel(x+i, y+7, ColorBlack); }
+  for (int i = 0; i < 8; i++) { rlcd->RLCD_SetPixel(x, y+i, ColorBlack); rlcd->RLCD_SetPixel(x+13, y+i, ColorBlack); }
+  rlcd_fill_rect(x+14, y+2, x+16, y+5);  // nub
+  int fill = (12 * pct) / 100;
+  for (int i = 0; i < fill; i++)
+    for (int j = 0; j < 6; j++)
+      rlcd->RLCD_SetPixel(x+1+i, y+1+j, ColorBlack);
+}
+
+// Two-row inverted header: row1 = 2x title, row2 = WiFi icon+SSID + temp/humi + battery icon+pct.
+static void display_draw_header(const char *wifi_status, int bat_pct, float temp, float humi) {
+  // Row 1: 2x title bar
+  rlcd_fill_rect(TUI_LEFT+1, HDR_Y1, TUI_RIGHT-1, HDR_Y2);
+  rlcd_draw_text_2x_inv(TEXT_LEFT, HDR_Y1+1, "ESP32-S3 PLE LLM");
+  // Row 2: 1x sensor strip
+  rlcd_fill_rect(TUI_LEFT+1, HDR2_Y1, TUI_RIGHT-1, HDR2_Y2);
+  int y = HDR2_Y1 + 1;
+  // left: WiFi icon + SSID
+  rlcd_draw_wifi_icon(TEXT_LEFT, y, strcmp(wifi_status, "No WiFi") != 0);
+  rlcd_draw_text_inv(TEXT_LEFT + 10, y, wifi_status);
+  // right: temp/humi | battery icon + pct (non-overlapping, right-aligned)
+  char buf[20];
+  snprintf(buf, sizeof(buf), "%d%%", bat_pct);              // "65%" = 3ch, 18px
+  int px = TEXT_RIGHT - strlen(buf) * CW;                    // pct text rightmost
+  rlcd_draw_text_inv(px, y, buf);
+  rlcd_draw_battery_icon(px - 18, y, bat_pct);              // icon 16px + 2px gap, left of pct
+  snprintf(buf, sizeof(buf), "%.0fC %.0f%%", temp, humi);   // temp/humi left of icon
+  rlcd_draw_text_inv(px - 18 - strlen(buf) * CW - 2, y, buf);
+  rlcd->RLCD_Display();
+}
+
+// Horizontal separator line inside the frame.
+static void display_draw_hline(int y) {
+  for (int x = TUI_LEFT+1; x < TUI_RIGHT; x++) rlcd->RLCD_SetPixel(x, y, ColorBlack);
+  rlcd->RLCD_Display();
+}
+
+// Generation cursor: a thin bar at the current output position, so the user
+// sees where the next token will appear during generation.  Height spans the
+// full CJK row (14px) so it stays visible on mixed ASCII/CJK output.
+static void display_draw_cursor() {
+  int cx = ox, cy = oy;
+  // Clamp to output area so the cursor never overlaps the border/footer
+  if (cx < TEXT_LEFT) cx = TEXT_LEFT;
+  if (cy < out_top) cy = out_top;
+  for (int y = cy; y < cy + CJK_H && y < out_bottom; y++)
+    for (int x = cx; x < cx + 2; x++)
+      if (x < TEXT_RIGHT) rlcd->RLCD_SetPixel(x, y, ColorBlack);
+  rlcd->RLCD_Display();
+}
+
+// Erase the generation cursor (repaint its 2px bar white) after generation ends
+// so the final screen has no stray vertical line next to the last character.
+static void display_clear_cursor() {
+  int cx = ox, cy = oy;
+  if (cx < TEXT_LEFT) cx = TEXT_LEFT;
+  if (cy < out_top) cy = out_top;
+  for (int y = cy; y < cy + CJK_H && y < out_bottom; y++)
+    for (int x = cx; x < cx + 2; x++)
+      if (x < TEXT_RIGHT) rlcd->RLCD_SetPixel(x, y, ColorWhite);
+  rlcd->RLCD_Display();
+}
+
+// Draw 2x prompt text (e.g. "> 本报告").  UTF-8 aware: ASCII uses the 2x 5x7
+// font (10x14), CJK uses the 14x14 glyph table (same 14px line height).
+static void display_draw_prompt_2x(const char *prefix, const unsigned char *body, int bodylen) {
+  int cx = 5;
+  // prefix (e.g. "> ")
+  while (*prefix) { char c = *prefix++; if (c >= 32 && c < 127) { rlcd_draw_char_2x(cx, PRM_Y, (unsigned char)c); cx += CW2; } }
+  // body (the prompt token bytes, UTF-8)
+  for (int i = 0; i < bodylen; ) {
+    int consumed;
+    int cp = utf8_decode(body + i, bodylen - i, &consumed);
+    if (cp < 0) { i++; continue; }
+    if (cp >= 32 && cp < 0x80) {
+      if (cx + CW2 > TUI_RIGHT - CW2) break;
+      rlcd_draw_char_2x(cx, PRM_Y, (unsigned char)cp);
+      cx += CW2;
+    } else {
+      if (cx + CJK_W > TUI_RIGHT - CJK_W) break;
+      rlcd_draw_cjk(cx, PRM_Y, cp);      // 14x14, same height as 2x ASCII
+      cx += CJK_W;
+    }
+    i += consumed;
+  }
+  rlcd->RLCD_Display();
+}
+
+// Inverted footer bar: fixed-position, fixed-width fields.
+// All fields occupy PRECISE pixel positions, no wrapping, no overflow.
+// Layout (CW=6):  TP=7ch | Ms=5ch | MP=5ch | HW=8ch | [flex] | DT=10ch(right-aligned)
+static void display_draw_footer(float tok_s, float ms) {
+  for (int x = TUI_LEFT+1; x < TUI_RIGHT; x++) rlcd->RLCD_SetPixel(x, DIV3_Y, ColorBlack);  // sep line
+  rlcd_fill_rect(TUI_LEFT, FTR_Y1, TUI_RIGHT, FTR_Y2);
+  int x = TEXT_LEFT, y = FTR_Y1 + 2;
+  // Throughput: "%5.1f" + "t/s" = 7 chars at fixed x
+  char buf[16];
+  snprintf(buf, sizeof(buf), "%5.1ft/s", tok_s);  // " 9.5t/s" or "10.5t/s" (7 chars)
+  rlcd_draw_text_inv(x, y, buf);
+  // Latency: "%3.0f" + "ms" = 5 chars at x+7*CW+6 = x+48
+  snprintf(buf, sizeof(buf), "%3.0fms", round(ms));
+  rlcd_draw_text_inv(x + 48, y, buf);
+  // Model: "28.9M" (5 chars) at x+48+5*CW+6 = x+48+36 = x+84
+  rlcd_draw_text_inv(x + 84, y, "28.9M");
+  // Hardware: "S3-N16R8" (8 chars) at x+84+5*CW+6 = x+84+36 = x+120
+  rlcd_draw_text_inv(x + 120, y, "S3-N16R8");
+  // Date/time from system clock (set by PCF85063 RTC via settimeofday,
+  // or defaults to 0 if no RTC).  Format: "MM/DD HH:MM" (11 chars, right-anchored).
+  time_t now = time(NULL);
+  struct tm *ti = localtime(&now);
+  strftime(buf, sizeof(buf), "%m/%d %H:%M", ti);
+  rlcd_draw_text_inv(TEXT_RIGHT - 11 * CW, y, buf);
+  rlcd->RLCD_Display();
+}
+
+#endif
+#endif
