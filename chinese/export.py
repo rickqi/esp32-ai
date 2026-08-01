@@ -73,6 +73,21 @@ def main():
     model.load_state_dict(ck["state"])
     model.eval()
 
+    # NaN/Inf cleanup: replace any corrupted weights with 0 (defensive —
+    # training noise can inject NaN that would poison quant scales / norms).
+    cleaned = 0
+    for name, w in model.named_parameters():
+        bad = torch.isnan(w.data) | torch.isinf(w.data)
+        if bad.any():
+            n = int(bad.sum().item())
+            print(f"  [clean] {name}: {n} NaN/Inf -> 0")
+            w.data[bad] = 0.0
+            cleaned += n
+    if cleaned:
+        print(f"  cleaned {cleaned} corrupted values total")
+    else:
+        print("  no NaN/Inf in weights")
+
     plan = []
     sd = model.state_dict()
 
