@@ -657,19 +657,14 @@ static void display_draw_header(const char *wifi_status, int bat_pct, float temp
   // Row 2: 1x sensor strip
   rlcd_fill_rect(TUI_LEFT+1, HDR2_Y1, TUI_RIGHT-1, HDR2_Y2);
   int y = HDR2_Y1 + 1;
-  // left group (centered on the 400px-wide screen):
-  //   [WiFi icon] [SSID] [version label]
-  // e.g.  [📶] 192.168.1.100 v3.2.1
-  int wlen = (int)strlen(wifi_status);
+  // left: WiFi icon + SSID (left-aligned)
+  rlcd_draw_wifi_icon(TEXT_LEFT, y, strcmp(wifi_status, "No WiFi") != 0);
+  rlcd_draw_text_inv(TEXT_LEFT + 10, y, wifi_status);
+  // center: version label (centered on the 400px-wide screen)
   int vlen = (int)strlen(FW_VERSION);
-  int gw = 10 + 4 + wlen * CW + 6 + vlen * CW;          // icon + gap + ssid + gap + version
-  int gx = TEXT_LEFT + (TEXT_RIGHT - TEXT_LEFT - gw) / 2;  // center the group
-  if (gx < TEXT_LEFT) gx = TEXT_LEFT;
-  rlcd_draw_wifi_icon(gx, y, strcmp(wifi_status, "No WiFi") != 0);
-  gx += 10 + 4;
-  rlcd_draw_text_inv(gx, y, wifi_status);
-  gx += wlen * CW + 6;
-  rlcd_draw_text_inv(gx, y, FW_VERSION);
+  int vx = TEXT_LEFT + (TEXT_RIGHT - TEXT_LEFT - vlen * CW) / 2;  // center
+  if (vx < TEXT_LEFT) vx = TEXT_LEFT;
+  rlcd_draw_text_inv(vx, y, FW_VERSION);
   // right: temp/humi | battery icon + pct (non-overlapping, right-aligned)
   char buf[20];
   snprintf(buf, sizeof(buf), "%d%%", bat_pct);              // "65%" = 3ch, 18px
