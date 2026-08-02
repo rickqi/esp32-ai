@@ -26,7 +26,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 from chinese.tokenizer import CharTokenizer  # noqa: E402
 
-MAX_DOC_CHARS = 50   # question(15) + answer(35)
+MAX_DOC_CHARS = 50   # answer-only: clean evidence, skip patient-question noise
 SEP = "\x01"
 # IDF weighting: rare chars (肺癌) outrank common chars (临床表现/的)
 # Build from the full KB so df is accurate; store per-term idf as u8 (scaled).
@@ -77,11 +77,12 @@ def main():
     entries = entries[:args.sample]
     print(f"sampled: {len(entries)}")
 
-    # Build docs: store as uint16 char-ids (compact, 2 bytes/char vs 3 bytes utf8)
+    # Build docs: store as uint16 char-ids (compact). ANSWER-ONLY evidence
+    # (skip patient-question part — P2 verified it injects colloquial noise).
     doc_off = [0]
     doc_ids = []  # flat uint16 char ids
     for q, a in entries:
-        doc = (q[:15] + SEP + a[:35])[:MAX_DOC_CHARS]
+        doc = a[:MAX_DOC_CHARS]  # answer only
         ids = [char2id.get(c, tok.UNK) for c in doc]
         doc_ids.extend(ids)
         doc_off.append(doc_off[-1] + len(ids))
