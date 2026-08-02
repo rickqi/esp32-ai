@@ -28,6 +28,10 @@
 16. [完整故障排查表](#16-完整故障排查表)
 17. [执行检查清单](#17-执行检查清单)
 18. [命令速查表](#18-命令速查表)
+19. [中文模型训练（v2 独立环境）](#19-中文模型训练v2-独立环境)
+20. [RAG 设备端检索（v2 精准问答）](#20-rag-设备端检索v2-精准问答)
+21. [三语言版本部署对照](#21-三语言版本部署对照)
+22. [原理参考（深度分析）](#22-原理参考深度分析)
 
 ---
 
@@ -1165,3 +1169,149 @@ static void display_stats(float tok_s, float ms) {
 > 这个教程对应的是 [esp32-ai](https://github.com/slvdev/esp32-ai) 项目，原始设计来自 slvDev。
 >
 > 如果你遇到任何教程中没有覆盖的问题，或者某一步无法继续，请告诉我具体现象（串口输出、错误信息等），我会帮你排查。
+
+---
+
+## 19. 中文模型训练（v2 独立环境）
+
+> 项目已演进到中文模型（`chinese/` v1 + `chinese_v2/` v2），与英文模型完全隔离。
+> 原理参考: [MODEL_ANALYSIS.md](MODEL_ANALYSIS.md)（PLE 架构 / 内存分层 / 训练设计）
+
+### 19.1 环境准备（GPU 训练，推荐）
+
+```bash
+# WSL (Ubuntu) + RTX 5080, torch 2.9.1+cu128
+cd /mnt/d/codes/esp32-ai
+python3 -c "import torch; print(torch.cuda.is_available())"  # 确认 True
+```
+
+Windows 端 cu128 配置（`pyproject.toml` 已锁定）:
+
+```toml
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+```
+
+### 19.2 数据准备（医学百科+教材）
+
+```bash
+# 下载 zjydiary/Medical (1.97GB, 魔搭镜像)
+uv run python chinese_v2/prepare.py --download
+uv run python chinese_v2/prepare.py
+# → data_v2/{corpus.txt 100M字符, tokenizer.json 6594, train.bin 99M tokens}
+```
+
+### 19.3 预训练 zh5（GPU 12 分钟）
+
+```bash
+python3 chinese/train.py --data-dir data_v2 --runs-dir runs_v2 \
+  --d-model 160 --n-layers 8 --n-heads 8 --ple-dim 192 \
+  --target-core 2500000 --steps 20000 --tag zh5
+```
+
+### 19.4 多源 SFT（57K 指令）
+
+```bash
+# 本草 + HuatuoGPT2 数据下载（可选）
+python3 chinese_v2/build_sft.py --zjydiary 30000 --benchao 8000 --huatuogpt2 20000
+# 微调
+python3 chinese/sft/sft_train.py --resume runs_v2/ple-zh5-s42.pt \
+  --sft-data data_v2/sft/sft_train.json --val-data data_v2/sft/sft_val.json \
+  --data-dir data_v2 --runs-dir runs_v2 \
+  --steps 3000 --instruction-ratio 0.9 --tag zh5-multi2
+```
+
+### 19.5 RAFT 微调（证据复述，可选但推荐）
+
+```bash
+python3 chinese_v2/build_raft.py --count 20000
+python3 chinese/sft/sft_train.py --resume runs_v2/ple-zh5-multi2-s42.pt \
+  --sft-data data_v2/sft/raft_train.json --val-data data_v2/sft/raft_val.json \
+  --data-dir data_v2 --runs-dir runs_v2 \
+  --steps 1500 --instruction-ratio 1.0 --tag raft
+```
+
+### 19.6 量化导出（group=32 关键！）
+
+```bash
+# 注意: 4-bit group=128 会导致 SFT 模型生成崩溃，必须用 group=32
+python3 chinese/quantize.py --tag raft --seed 42 --runs-dir runs_v2 --data-dir data_v2
+python3 chinese/export.py ple-raft-s42 --runs-dir runs_v2 --out-dir firmware/model_v2
+uv run python chinese/gen_vocab.py --tokenizer data_v2/tokenizer.json \
+  --out firmware/esp32_llm_zh_v2/vocab.h
+```
+
+---
+
+## 20. RAG 设备端检索（v2 精准问答）
+
+> 小模型（13.7M）无事实记忆，RAG 用外部知识库弥补。原理见 MODEL_ANALYSIS.md §5。
+
+### 20.1 知识库构建（PC 一次性）
+
+```bash
+# 下载 Huatuo26M-Lite (93.5K 医学QA, hf-mirror)
+# → data_v2/kb/format_data.jsonl
+
+# 构建 IDF 加权倒排索引 (1.83MB)
+python3 chinese/kb/build_index.py --sample 10000
+# → data_v2/kb/index.bin
+```
+
+### 20.2 烧录知识库（kb 分区）
+
+```powershell
+# kb 分区在 0xA00000 (2MB)
+esptool.py --chip esp32s3 --port COM4 --baud 921600 write_flash 0xA00000 data_v2/kb/index.bin
+```
+
+### 20.3 设备端流程（固件已集成）
+
+```
+串口问题 → rag.h 检索(0.6ms) → 证据注入 prompt → RAFT 模型续写
+  BOS <user> [KB证据] 问题 <end> <assistant>
+```
+
+分区布局（v2 固件 `esp32_llm_zh_v2/partitions.csv`）:
+
+```
+factory 0x10000 (1.375MB) | model 0x170000 (8.5MB) | kb 0xA00000 (2MB) | coredump
+```
+
+---
+
+## 21. 三语言版本部署对照
+
+> 三个固件版本相互隔离（`firmware/README.md` 完整矩阵）。
+
+| 版本 | 目录 | 模型 | 词表 | RAG | 烧录 |
+|---|---|---|---|---|---|
+| 英文 | `esp32_llm/` | cleandeploy 28.9M | 32,768 | ❌ | model.bin(0x170000) |
+| 中文 v1 | `esp32_llm_zh/` | zh4-ds 12.5M | 5,904 | ❌ | model.bin(0x170000) |
+| 中文 v2 | `esp32_llm_zh_v2/` | zh5-multi2/raft 13.7M | 6,594 | ✅ | model.bin + kb索引(0xA00000) |
+
+### 中文模型推荐流程
+
+```powershell
+# 1. 生成中文 vocab.h（每台机器）
+uv run python chinese/gen_vocab.py --tokenizer data_v2/tokenizer.json
+uv run python chinese/gen_vocab.py --tokenizer data_chinese/tokenizer.json  # v1
+
+# 2. 编译中文固件
+arduino-cli compile --fqbn 'esp32:esp32:esp32s3:...' firmware/esp32_llm_zh_v2
+
+# 3. 烧录（v2 需要 model + kb）
+esptool.py write_flash 0x170000 firmware/model_v2/model.bin
+esptool.py write_flash 0xA00000 data_v2/kb/index.bin
+```
+
+---
+
+## 22. 原理参考（深度分析）
+
+| 文档 | 内容 |
+|---|---|
+| [MODEL_ANALYSIS.md](MODEL_ANALYSIS.md) | 模型设计调用方式 + 中文 vs 英文对比（中文） |
+| [MODEL_ANALYSIS_EN.md](MODEL_ANALYSIS_EN.md) | 同上（英文） |
+| [firmware/README.md](firmware/README.md) | 三语言固件版本说明 + RAG 索引位置 |
+| [chinese/CHANGELOG.md](chinese/CHANGELOG.md) | 完整变更记录（v1+v2 演进） |
