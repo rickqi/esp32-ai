@@ -28,6 +28,15 @@ EVIDENCE_CHARS = 60   # evidence = answer[:60]
 MAX_ANSWER = 150      # target answer capped
 
 
+def resolve_env(data_dir):
+    """Switch to an alternate environment (e.g. data_v3)."""
+    global DATA_DIR, OUT_DIR, KB
+    if data_dir:
+        DATA_DIR = Path(data_dir)
+    OUT_DIR = DATA_DIR / "sft"
+    KB = DATA_DIR / "kb" / "format_data.jsonl"
+
+
 def encode_raft(tok, evidence, answer):
     """input = BOS <user> EVIDENCE <end> <assistant> ; target = ANSWER EOS."""
     u, a, e = tok.USER, tok.ASSIST, tok.END
@@ -60,7 +69,9 @@ def main():
     ap.add_argument("--count", type=int, default=20000)
     ap.add_argument("--val-count", type=int, default=2000)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--data-dir", default=None, help="Env data dir (e.g. data_v3)")
     args = ap.parse_args()
+    resolve_env(args.data_dir)
 
     tok = CharTokenizer.load(str(DATA_DIR / "tokenizer.json"))
     print(f"tokenizer: {tok.vocab_size}")
