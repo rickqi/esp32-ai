@@ -95,6 +95,11 @@ python tools/cjk_*.py          # CJK 显示/截图验证
 - **中文 SFT 模型:必须 4-bit group=32**(group=128 会致生成崩溃/退化,如 ">>>>>"、"痞痞痞" 循环)。
 - `chinese/export.py` 顶部 `GROUP = 32` 已设定;若改回去会破坏中文模型。
 - **group 参数必须显式传给 `quant_pack`**:`quant_pack(t, group=GROUP)`。曾因默认值(128)与文件头(32)不一致导致布局错位、C 端 NaN。
+- **模型二进制格式变更 = 必须重烧模型**:`firmware/common/llm.h` 的读取格式(如 `bind_q` 每 tensor 前读 bits 字节)一旦改动,
+  `model.bin` 必须同步重新导出 + **重新烧录到设备**。曾踩坑:llm.h 改为新格式(读 1 字节 bits),设备 Flash 里还是旧格式 model.bin,
+  固件/模型错位 → 推理静默失败(生成空输出/乱码,但**速度异常快**是信号:profile FFN/PLE 从 ~108/37ms 骤降至 ~41/14ms)。
+  判断方法:对比磁盘 model.bin 大小与设备实际烧录版本;`wsl /tmp/verify model.bin golden.txt` 主机 PASS 只能证明磁盘文件正确,
+  不证明设备 Flash 版本匹配。
 
 ## 已提交二进制(容易误覆盖)
 
