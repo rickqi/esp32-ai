@@ -7,6 +7,17 @@
 
 ## v3 环境（蒸馏版本，独立）
 
+### 2026-08-02: P3 RAFT 格式对齐落地（zh6-raft3）
+- 🎯 **根因定位**: raft1 训练格式 `BOS <user> E <end> <assistant>` 无 question,
+  固件推理格式 `BOS <user> E1 \n E2 \n QUESTION <end> <assistant>` 有 question+双证据
+  → 训练/推理分布偏移 = 复述保真度有限的真根因(Top-1 注入退化也由此解释,941f21b)
+- 🛠️ **落地**: `build_raft.py --top2` 对齐固件注入格式(E1/E2 同条目 answer 两段 +
+  真实 question),重训 `zh6-raft3`(resume zh6-distill, 1500 步, 60s)
+- 📊 **验证**: val ppl 1.0(vs raft1 2.7);"肺癌早期症状"逐字忠实复述证据
+  (raft1 有"气胸/呼吸困难"自由发挥),双 seed 一致
+- 📦 **产物**: `firmware/model_v3/model.bin` 8.5MB, 主机 verify **PASS** (max abs diff 1e-5)
+- 🗑️ **废弃**: `[证据]` 前缀方案(139d590)因固件模板无前缀而回归,`--prefix-marker` 保留参考
+
 ### 2026-08-02: 版本号标签 + RAG Top-2 回滚
 - 🏷️ **固件版本号 `v3.2.1`**: 语义化版本(3=v3 线, 2=显示+采样里程碑, 1=RAG Top-1 回滚修复),
   定义于 `display.h` `#define FW_VERSION "v3.2.1"`,注释说明 bump 规则

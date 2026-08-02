@@ -1,13 +1,16 @@
 """
 RAFT (Retrieval-Augmented Fine-Tuning) data builder for v2.
 
-Training sample:  input = <user>[evidence]<end><assistant>  target = answer
-where [evidence] is the truncated answer from the same KB entry (self-grounded).
-This teaches the model to "copy from evidence" — the key enabler for small
-models to actually use retrieved context in RAG.
+Training sample (P3 top2 format, matches firmware rag_augment_prompt):
+    input  = <user> E1 \n E2 \n QUESTION <end> <assistant>
+    target = ANSWER
+where E1/E2 are answer-only evidence slices from the same KB entry
+(self-grounded, like the answer-only index docs).  This teaches the model
+to "copy from evidence after a question" -- the exact distribution the
+firmware injects (Top-2 docs + user question).
 
 Usage:
-    uv run python chinese_v2/build_raft.py --count 20000
+    uv run python chinese_v2/build_raft.py --count 20000 --top2
 """
 
 import argparse
@@ -37,12 +40,18 @@ def resolve_env(data_dir):
     KB = DATA_DIR / "kb" / "format_data.jsonl"
 
 
-def encode_raft(tok, evidence, answer, prefix_marker=False):
-    """input = BOS <user> EVIDENCE <end> <assistant> ; target = ANSWER EOS.
+def encode_raft(tok, question, answer, top2=False, prefix_marker=False):
+    """input = BOS <user> E1 \n E2 \n QUESTION <end> <assistant> ; target = ANSWER EOS.
 
-    P3: prefix_marker=True wraps evidence in [证据]...[/证据] so the model
-    explicitly learns "bracketed content is to be faithfully reproduced",
-    reducing free-form drift during RAG reproduction.
+    P3 (format alignment): top2=True matches the firmware's rag_augment_prompt()
+    Top-2 injection exactly: two evidence docs (answer[:50] each, like the
+    answer-only index docs) joined with '\n', then the question, then the
+    SFT markers.  Training on this distribution removes the train/infer
+    format mismatch that limited raft1's paraphrase fidelity.
+
+    prefix_marker=True (deprecated): wraps evidence in [证据]...[/证据] -- the
+    earlier P3 experiment (139d590) showed this REGRESSES because the firmware
+    prompt template does not use the marker; kept for reference only.
     """
     u, a, e = tok.USER, tok.ASSIST, tok.END
 
@@ -60,9 +69,16 @@ def encode_raft(tok, evidence, answer, prefix_marker=False):
                 ids.append(tok.stoi.get(text[i], UNK)); i += 1
         return ids
 
-    if prefix_marker:
-        evidence = f"[证据]{evidence}[/证据]"
-    prefix = ids_of(f"<user>{evidence}<end><assistant>")
+    if top2:
+        e1 = answer[:EVIDENCE_CHARS]
+        e2 = answer[EVIDENCE_CHARS:2 * EVIDENCE_CHARS] or answer[:EVIDENCE_CHARS]
+        prefix = ids_of(f"<user>{e1}\n{e2}\n{question}<end><assistant>")
+    elif prefix_marker:
+        evidence = f"[证据]{answer[:EVIDENCE_CHARS]}[/证据]"
+        prefix = ids_of(f"<user>{evidence}<end><assistant>")
+    else:
+        evidence = answer[:EVIDENCE_CHARS]      # self-grounded evidence
+        prefix = ids_of(f"<user>{evidence}<end><assistant>")
     ans = ids_of(answer)
     input_ids = [BOS] + prefix + ans + [EOS]
     n_pref = len(prefix) + 1
@@ -78,7 +94,9 @@ def main():
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--data-dir", default=None, help="Env data dir (e.g. data_v3)")
     ap.add_argument("--prefix-marker", action="store_true",
-                    help="P3: wrap evidence in [证据]...[/证据] marker")
+                    help="P3(deprecated): wrap evidence in [证据]...[/证据] marker")
+    ap.add_argument("--top2", action="store_true",
+                    help="P3: align with firmware Top-2 injection (E1\\nE2\\nQUESTION)")
     args = ap.parse_args()
     resolve_env(args.data_dir)
 
@@ -107,9 +125,8 @@ def main():
     def build(items):
         enc = []
         for q, a in items:
-            evidence = a[:EVIDENCE_CHARS]      # self-grounded evidence
-            answer = a[:MAX_ANSWER]
-            input_ids, labels = encode_raft(tok, evidence, answer,
+            input_ids, labels = encode_raft(tok, q, a,
+                                            top2=args.top2,
                                             prefix_marker=args.prefix_marker)
             enc.append({"input_ids": input_ids, "labels": labels})
         return enc
