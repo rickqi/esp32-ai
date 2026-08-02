@@ -95,6 +95,57 @@ firmware/common/llm.h    # PLE 推理核心（版本无关，读 header 动态�
 | 中文 v1 | 固件 + model.bin(0x170000) |
 | 中文 v2 | 固件 + model.bin(0x170000) + **kb 索引(0xA00000)** |
 
+## RAG 索引存放位置（v2）
+
+### 📁 源文件（PC 构建产物）
+
+```
+D:\codes\esp32-ai\data_v2\kb\index.bin         ← 1.83MB 倒排索引（构建产物）
+D:\codes\esp32-ai\data_v2\kb\format_data.jsonl ← Huatuo26M-Lite 原始数据 72.8MB
+D:\codes\esp32-ai\data_v2\kb\                  ← 知识库目录
+```
+
+### 🎯 烧录位置（设备端）
+
+```
+ESP32-S3 Flash 分区布局 (16MB):
+┌─────────────────────────────────────┐
+│ nvs       0x9000   (20KB)          │
+│ factory   0x10000  (1.375MB 固件)  │
+│ model     0x170000 (8.5MB 模型)    │
+│ kb        0xA00000 (2MB 索引) ★    │
+│ coredump  0xFF0000 (64KB)          │
+└─────────────────────────────────────┘
+
+kb 分区: 0xA00000 起，2MB 容量（索引 1.83MB 放得下）
+```
+
+### 🔄 设备端使用流程
+
+```powershell
+# 烧录时（有 arduino-cli 环境）
+esptool.py --chip esp32s3 --port COM4 --baud 921600 write_flash 0xA00000 data_v2/kb/index.bin
+```
+
+```c
+// 运行时 (esp32_llm_zh_v2.ino)
+rag_init()
+  → esp_partition_find_first("kb", subtype 0x41)
+  → esp_partition_mmap(kb 分区)       // flash 内存映射
+  → rag.h 从 mmap 地址检索 (0.6ms/10K 文档)
+```
+
+### 关键点
+
+| 项 | 位置 |
+|---|---|
+| 索引源文件 | `data_v2/kb/index.bin`（1.83MB，PC 构建） |
+| 烧录分区 | Flash `0xA00000`（kb 分区，2MB） |
+| 运行时访问 | **flash mmap**（ESP_PARTITION_MMAP_DATA，不占 PSRAM） |
+| 构建脚本 | `chinese/kb/build_index.py` |
+
+> 💡 索引通过 flash mmap 直接读取（像 model.bin 一样），**不占用 PSRAM**——PSRAM 8MB 余量全部留给模型运行。
+
 ## 生成能力对比
 
 | 维度 | 英文 | 中文 v1 | 中文 v2 |
