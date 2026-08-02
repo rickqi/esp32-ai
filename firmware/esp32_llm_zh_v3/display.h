@@ -332,6 +332,11 @@ static const uint8_t RLCD_FONT[] = {
 #define TEXT_LEFT  (TUI_LEFT + BORDER_W + 4)   // = 7,  4px padding inside border
 #define TEXT_RIGHT (TUI_RIGHT - BORDER_W - 3)  // = 392, 3px padding inside right border
 
+// Firmware version label shown in the top notification bar (after the WiFi
+// SSID). Semantic: MAJOR=3 (v3 line), MINOR=2 (display+sampling milestone),
+// PATCH=1 (RAG Top-1 rollback fix). Bump on user-visible firmware changes.
+#define FW_VERSION "v3.2.1"
+
 static DisplayPort *rlcd = nullptr;
 static int ox = 0, oy = 0;
 
@@ -652,9 +657,19 @@ static void display_draw_header(const char *wifi_status, int bat_pct, float temp
   // Row 2: 1x sensor strip
   rlcd_fill_rect(TUI_LEFT+1, HDR2_Y1, TUI_RIGHT-1, HDR2_Y2);
   int y = HDR2_Y1 + 1;
-  // left: WiFi icon + SSID
-  rlcd_draw_wifi_icon(TEXT_LEFT, y, strcmp(wifi_status, "No WiFi") != 0);
-  rlcd_draw_text_inv(TEXT_LEFT + 10, y, wifi_status);
+  // left group (centered on the 400px-wide screen):
+  //   [WiFi icon] [SSID] [version label]
+  // e.g.  [📶] 192.168.1.100 v3.2.1
+  int wlen = (int)strlen(wifi_status);
+  int vlen = (int)strlen(FW_VERSION);
+  int gw = 10 + 4 + wlen * CW + 6 + vlen * CW;          // icon + gap + ssid + gap + version
+  int gx = TEXT_LEFT + (TEXT_RIGHT - TEXT_LEFT - gw) / 2;  // center the group
+  if (gx < TEXT_LEFT) gx = TEXT_LEFT;
+  rlcd_draw_wifi_icon(gx, y, strcmp(wifi_status, "No WiFi") != 0);
+  gx += 10 + 4;
+  rlcd_draw_text_inv(gx, y, wifi_status);
+  gx += wlen * CW + 6;
+  rlcd_draw_text_inv(gx, y, FW_VERSION);
   // right: temp/humi | battery icon + pct (non-overlapping, right-aligned)
   char buf[20];
   snprintf(buf, sizeof(buf), "%d%%", bat_pct);              // "65%" = 3ch, 18px
