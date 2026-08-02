@@ -7,6 +7,30 @@
 
 ## v2 环境（医学数据，独立版本）
 
+### 2026-08-01: P3.5 RAFT 微调（证据复述能力）
+- ✅ build_raft.py: 20K 自引用证据对（answer[:60] → answer），GPU 50s 训练
+- ✅ val ppl 2.6；验证: 给"收缩压≥140mmHg"证据 → 模型精确复述
+- 📌 **RAG 完整生成与生效机制**（端到端）:
+  ```
+  【知识库生成】(PC 一次性)
+  Huatuo26M-Lite(93.5K QA) → build_index.py
+    → 字符级倒排索引 1.83MB（doc_off + doc_ids + inverted）
+    → 烧录到 ESP32 "kb" 分区 (0xA00000, 2MB)
+
+  【设备端生效】(每次提问)
+  ① 串口收到问题(PC 已 token 化) → decode_question 还原文本
+  ② rag.h 检索: 问题字符 → 倒排/线性扫描打分 → top-2 医学QA片段
+  ③ rag_augment_prompt: BOS <user> [KB1][KB2] 问题 <end> <assistant>
+  ④ RAFT 微调模型(ple-raft) 基于证据续写 → 输出有依据回答
+
+  【为什么 RAFT 关键】
+  小模型(13.7M)无事实记忆 → 单纯 RAG 不引用证据
+  RAFT 训练"证据→答案"复述 → 模型学会提取证据内容
+  本地验证: 无 RAG 时严重退化(重复), 有 RAG+RAFT 引用咳嗽/胸痛 ✅
+  ```
+- ⚠️ **当前瓶颈**: 检索噪声(肠癌/肝癌误命中)被 RAFT 忠实复述 → 需 IDF 加权
+- 提交: `b13ce8b`
+
 ### 2026-08-01: P3 RAG 设备端检索（B3 混合方案）
 - ✅ Huatuo26M-Lite 93.5K 知识库 + 1.83MB 倒排索引
 - ✅ rag.h 检索器（线性扫描 TF-IDF，本地验证 23-53ms/10K）
