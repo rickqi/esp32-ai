@@ -7,6 +7,17 @@
 
 ## v3 环境（蒸馏版本，独立）
 
+### 📌 V3 数据生成来源与具体方式（补充）
+
+| 数据 | 来源 | 具体方式 |
+|---|---|---|
+| **预训练语料** | 魔搭 `zjydiary/Medical`（shibing624/medical 镜像） | 医学百科 361,420 条 + 教材 8,475 条 → 清洗去 LaTeX/表格 → 100M 字符 → v3 词表（min_freq=1）编码 99.3M tokens |
+| **SFT 指令数据** | 三个高质量池（均 Qwen/DeepSeek 等大模型生成） | ① `zjydiary finetune`（1.95M QA）采样 30K ② `BenTsao 本草`（GitHub SCIR-HI 8.6K）全量 7.2K ③ `HuatuoGPT2-GPT4-140K`（hf-mirror 142K）采样 20K → **57K 多源混合** → shifted-labels 编码 |
+| **RAFT 证据数据** | `Huatuo26M-Lite`（93.5K 医学 QA） | answer[:60] 为自引用证据 → answer 为目标，20K 对（教"抄写证据"） |
+| **词表** | 医学语料统计 | min_freq=1 保留低频字符 → **7,563 词表**（v2 6,594） |
+
+**数据蒸馏本质**：SFT 数据全部来自 Qwen3-0.6B/DeepSeek/HuatuoGPT2 大模型生成的高质量医学问答——学生（15.8M PLE）从"教师产出"学习，即数据蒸馏（logits KL 因词表不匹配不可行）。
+
 ### 2026-08-02: V3 固件构建 + 部署文档修正
 - ✅ **v3 固件完成**: `esp32_llm_zh_v3/` 由 v2 结构构建(ino/display/cjk_font/rag.h),
   vocab.h 7563 词表, 特殊 token 用通用公式 `N-3/N-2/N-1`(词表末尾),
