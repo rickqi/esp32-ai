@@ -511,9 +511,10 @@ static int sample_token(float *logits, int n, float temp, int topk, uint32_t *rn
 static int rag_augment_prompt() {
   if (!rag_ready) return 0;
   uint16_t kb_docs[RAG_TOP_K][48];
-  // P2: inject Top-1 only (Top-2+ can dilute with lower-relevance evidence;
-  // verified: answer-only Top-1 already contains the complete answer).
-  int nd = rag_retrieve_for_question(kb_docs, 1);
+  // P2: Top-1-only was tested on device and REGRESSED (short/empty outputs:
+  // 癌症肿瘤->12 tok, 感冒如何->empty, 肺癌早期症状->9 tok). Top-2 provides
+  // redundancy for the raft model to paraphrase; keep RAG_TOP_K=3, use top 2.
+  int nd = rag_retrieve_for_question(kb_docs, 2);
   if (nd == 0) return 0;
 
   int uid = VOCAB_N - 3;  // <user>
