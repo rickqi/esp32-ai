@@ -28,6 +28,21 @@ from chinese.tokenizer import CharTokenizer  # noqa: E402
 
 MAX_DOC_CHARS = 50   # question(15) + answer(35)
 SEP = "\x01"
+# IDF weighting: rare chars (肺癌) outrank common chars (临床表现/的)
+# Build from the full KB so df is accurate; store per-term idf as u8 (scaled).
+IDF_SCALE = 64.0
+
+
+def compute_idf(inverted, n_docs, vocab_size):
+    """idf[char] = log(1 + N / df) scaled to u8, clipped to 255.
+    Rare chars (df small) saturate high; common chars get small weights."""
+    import math
+    idf = {}
+    for cid, doclist in inverted.items():
+        df = len(doclist)
+        v = int(IDF_SCALE * math.log(1.0 + n_docs / max(df, 1)))
+        idf[cid] = min(v, 255)
+    return idf
 
 
 def main():
@@ -83,14 +98,18 @@ def main():
             inverted.setdefault(cid, []).append(di)
 
     terms = sorted(inverted.keys())
+    idf = compute_idf(inverted, len(entries), tok.vocab_size)
     print(f"terms: {len(terms)}")
 
-    # Serialize: magic | n_docs | n_terms | vocab | doc_off | doc_ids | inverted
+    # Serialize: magic | n_docs | n_terms | vocab | doc_off | doc_ids
+    #           | idf table (u8 per term) | inverted
     out = bytearray()
     out += b"RAG1"
     out += struct.pack("<III", len(entries), len(terms), tok.vocab_size)
-    out += struct.pack(f"<{len(doc_off)}I", *doc_off)          # fixed size first
-    out += struct.pack(f"<{len(doc_ids)}H", *doc_ids)          # then flat char ids
+    out += struct.pack(f"<{len(doc_off)}I", *doc_off)
+    out += struct.pack(f"<{len(doc_ids)}H", *doc_ids)
+    # idf table: one u8 per term (idf[term_i])
+    out += struct.pack(f"<{len(terms)}B", *[idf[t] for t in terms])
     # inverted: per term: char_id + count + doc ids (uint16)
     for t in terms:
         ids = inverted[t]
@@ -100,6 +119,12 @@ def main():
     Path(args.out).write_bytes(bytes(out))
     print(f"index: {len(out)/1e6:.2f} MB -> {args.out}")
     avg_len = doc_off[-1] / len(entries)
+    # show a few idf values
+    sample_terms = ["肺", "癌", "临", "床", "表", "现", "治", "疗", "症", "状"]
+    for ch in sample_terms:
+        cid = char2id.get(ch)
+        if cid in idf:
+            print(f"  idf[{ch}]={idf[cid]}")
     print(f"avg doc chars: {avg_len:.0f}, terms: {len(terms)}")
 
 

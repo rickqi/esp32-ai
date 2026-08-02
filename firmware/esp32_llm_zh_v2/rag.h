@@ -24,12 +24,14 @@ typedef struct {
   uint32_t vocab_size;
   const uint32_t *doc_off;     // n_docs+1 offsets
   const uint16_t *doc_ids;     // flat char ids
-  // inverted parsed lazily on load
+  const uint8_t *idf;          // n_terms u8 idf weights (scaled 64x)
+  const uint8_t *inv_start;    // inverted index start
 } RagIndex;
 
 #define RAG_MAGIC 0x31474152u  // "RAG1"
 #define RAG_TOP_K 3
 #define RAG_MAX_Q 128
+#define RAG_IDF_SCALE 64.0f
 
 // Load index from a byte buffer (PSRAM). Returns 0 on success.
 static int rag_load(RagIndex *r, const uint8_t *buf) {
@@ -43,6 +45,9 @@ static int rag_load(RagIndex *r, const uint8_t *buf) {
   r->doc_off = (const uint32_t *)(buf + 16);
   const uint8_t *p = buf + 16 + (r->n_docs + 1) * 4;
   r->doc_ids = (const uint16_t *)p;
+  p += (size_t)r->doc_off[r->n_docs] * 2;
+  r->idf = p;                       // n_terms bytes
+  r->inv_start = p + r->n_terms;    // inverted entries
   return 0;
 }
 
@@ -57,27 +62,39 @@ static uint32_t rag_doc_chars(const RagIndex *r, uint32_t di,
   return n;
 }
 
-// Retrieve top-K docs for a query (char ids). Scores = matched unique chars.
+// IDF lookup: find term index for a char id (linear over terms — fine for
+// 2-3K terms; could binary-search since terms are sorted).
+static int rag_idf_of(const RagIndex *r, uint16_t char_id) {
+  const uint8_t *p = r->inv_start;
+  for (uint32_t i = 0; i < r->n_terms; i++) {
+    uint32_t cid; uint16_t cnt;
+    memcpy(&cid, p, 4); memcpy(&cnt, p + 4, 2);
+    if (cid == char_id) return r->idf[i];
+    p += 6 + (size_t)cnt * 2;
+  }
+  return 0;  // not in vocab
+}
+
+// Retrieve top-K docs for a query (char ids). IDF-weighted score.
 // Returns number of results; fills best_docs[] and best_scores[].
 static int rag_retrieve(const RagIndex *r, const uint16_t *q_ids, int q_len,
                         uint32_t *best_docs, int *best_scores) {
-  // Linear scan scoring is fine for ~10K docs on ESP32 (few ms).
   int scores[RAG_TOP_K] = {0, 0, 0};
   uint32_t best[RAG_TOP_K] = {0, 0, 0};
-  uint8_t seen[4096] = {0};  // dedupe chars per doc (vocab <= 4096 typical)
 
   for (uint32_t di = 0; di < r->n_docs; di++) {
     uint32_t a = r->doc_off[di], b = r->doc_off[di + 1];
     int score = 0;
     for (uint32_t i = a; i < b; i++) {
       uint16_t cid = r->doc_ids[i];
-      // count query chars present in doc (unique)
       for (int q = 0; q < q_len; q++) {
-        if (q_ids[q] == cid) { score++; break; }
+        if (q_ids[q] == cid) {
+          score += rag_idf_of(r, cid);  // weighted by rarity
+          break;
+        }
       }
     }
     if (score == 0) continue;
-    // insert into top-K
     for (int k = 0; k < RAG_TOP_K; k++) {
       if (score > scores[k]) {
         for (int j = RAG_TOP_K - 1; j > k; j--) {
