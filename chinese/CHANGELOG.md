@@ -1,9 +1,21 @@
 # 中文模型项目变更说明 (CHANGELOG)
 
 > 分支: feature/ESP32-S3-4.2inch-RLCD
-> 覆盖: chinese/ (v1) + chinese_v2/ (v2) 全部演进
+> 覆盖: chinese/ (v1) + chinese_v2/ (v2) + chinese_v3/ (v3) 全部演进
 
 ---
+
+## v3 环境（蒸馏版本，独立）
+
+### 2026-08-02: V3 蒸馏完成（P0-P4）
+- ✅ 数据: 7,563 词表（min_freq=1）+ 50K SFT + 99M tokens
+- ✅ zh6 预训练 15.8M（val ppl 22.35）
+- ✅ zh6-distill 数据蒸馏 SFT（val ppl 9.2）——Qwen3-0.6B 数据蒸馏
+- ✅ zh6-raft（val ppl 2.7，证据复述：咳嗽/咳痰/胸痛）
+- ✅ model.bin 8.92MB + vocab.h 7,563（单台 ESP32 ✅）
+- 🔧 关键决策: logits KL 蒸馏不可行（Qwen 151K BPE vs 学生 7.5K 字符词表不匹配）→ 改数据蒸馏
+- 🔧 修复: val.bin 编码 0 尾部 bug
+- 提交: `dc804a2` `15eb35d` `cb7ff6f` `f041de5`
 
 ## v2 环境（医学数据，独立版本）
 

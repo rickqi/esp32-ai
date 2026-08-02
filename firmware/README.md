@@ -12,6 +12,9 @@
 | **英文版** | `firmware/esp32_llm/` | cleandeploy 28.9M | 英文故事 | 32,768 BPE | `firmware/model/model.bin` (14.9MB) | ❌ | ✅ TFT/RLCD |
 | **中文 v1** | `firmware/esp32_llm_zh/` | zh4-ds 12.5M | 中文 | 5,904 字符 | `firmware/model_chinese/model.bin` (6.3MB) | ❌ | ✅ + CJK |
 | **中文 v2** | `firmware/esp32_llm_zh_v2/` | zh5-multi2/raft 13.7M | 中文医学 | 6,594 字符 | `firmware/model_v2/model.bin` (7.5MB) | ✅ | ✅ + CJK |
+| **中文 v3** | `firmware/esp32_llm_zh_v3/` | zh6-raft 15.8M | 中文医学 | 7,563 字符 | `firmware/model_v3/model.bin` (8.92MB) | ✅ | ✅ + CJK |
+
+> v3 = 蒸馏版本（Qwen3-0.6B 数据蒸馏 + RAFT 证据复述），详见 `chinese_v3/docs/PLAN.md`
 
 ---
 
