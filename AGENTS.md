@@ -13,6 +13,15 @@
 - `main` 已休眠(HEAD 停留在 SD 卡日志时代)。**不要基于 main 开发**。
 - 提交信息用 conventional 前缀(`feat:`/`fix:`/`docs:`/`chore:`),中英混合正文。
 
+## 固件版本号规则(硬性要求)
+
+- **每次提交推送(涉及固件代码变更)必须同时 bump 版本号** `FW_VERSION`(定义于各固件 `display.h`)。
+- 语义化版本:`MAJOR.MINOR.PATCH` —— MAJOR=3(v3 固件线),MINOR=新功能里程碑,
+  **PATCH=每次用户可见的固件改动**(bugfix/布局/显示/采样等)都 +1。
+- 纯 docs 提交(AGENTS/CHANGELOG/README 等)**不 bump**。
+- 规则写入 display.h 中 `FW_VERSION` 的注释,保持一致。
+- 当前版本:英文版无版本号;v3 = `v3.2.2`(图标 ColorWhite 修复)。
+
 ## 多环境隔离(本仓库最重要的模式)
 
 存在 **4 套相互隔离的训练+固件环境**,任何跨环境混用都会静默破坏数据:

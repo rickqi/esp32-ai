@@ -334,8 +334,9 @@ static const uint8_t RLCD_FONT[] = {
 
 // Firmware version label shown in the top notification bar (after the WiFi
 // SSID). Semantic: MAJOR=3 (v3 line), MINOR=2 (display+sampling milestone),
-// PATCH=1 (RAG Top-1 rollback fix). Bump on user-visible firmware changes.
-#define FW_VERSION "v3.2.1"
+// PATCH=2 (header icons ColorBlack->ColorWhite fix). RULE: bump the PATCH on
+// every user-visible firmware change, MINOR on new milestones. See AGENTS.md.
+#define FW_VERSION "v3.2.2"
 
 static DisplayPort *rlcd = nullptr;
 static int ox = 0, oy = 0;
@@ -536,6 +537,11 @@ static void rlcd_fill_rect(int x0, int y0, int x1, int y1) {
   for (int y = y0; y <= y1; y++) for (int x = x0; x <= x1; x++) rlcd->RLCD_SetPixel(x, y, ColorBlack);
 }
 
+// Fill a rectangle white (for icons on inverted header rows).
+static void rlcd_fill_rect_inv(int x0, int y0, int x1, int y1) {
+  for (int y = y0; y <= y1; y++) for (int x = x0; x <= x1; x++) rlcd->RLCD_SetPixel(x, y, ColorWhite);
+}
+
 // Set the text cursor for subsequent display_puts calls.
 static void display_set_cursor(int x, int y) { ox = x; oy = y; }
 
@@ -615,7 +621,9 @@ static void display_draw_frame() {
 }
 
 // ---- small pixel icons ------------------------------------------------------
-// WiFi signal icon (10x8): two arcs + base dot. Draws in ColorBlack.
+// NOTE: header row 2 is an INVERTED (black) bar, so icons must be drawn with
+// ColorWhite like rlcd_draw_text_inv -- ColorBlack made them invisible.
+// WiFi signal icon (10x8): two arcs + base dot. Draws in ColorWhite.
 static void rlcd_draw_wifi_icon(int x, int y, bool on) {
   static const uint8_t WIFI[8] = {
     0b00011000,  //    ##
@@ -630,19 +638,19 @@ static void rlcd_draw_wifi_icon(int x, int y, bool on) {
   for (int r = 0; r < 8; r++) {
     uint8_t row = on ? WIFI[r] : 0b00000000;
     for (int c = 0; c < 8; c++)
-      if (row & (0x80 >> c)) rlcd->RLCD_SetPixel(x + c, y + r, ColorBlack);
+      if (row & (0x80 >> c)) rlcd->RLCD_SetPixel(x + c, y + r, ColorWhite);
   }
 }
 
 // Battery icon (16x8): outline + fill bar proportional to pct (0-100).
 static void rlcd_draw_battery_icon(int x, int y, int pct) {
-  for (int i = 0; i < 14; i++) { rlcd->RLCD_SetPixel(x+i, y, ColorBlack); rlcd->RLCD_SetPixel(x+i, y+7, ColorBlack); }
-  for (int i = 0; i < 8; i++) { rlcd->RLCD_SetPixel(x, y+i, ColorBlack); rlcd->RLCD_SetPixel(x+13, y+i, ColorBlack); }
-  rlcd_fill_rect(x+14, y+2, x+16, y+5);  // nub
+  for (int i = 0; i < 14; i++) { rlcd->RLCD_SetPixel(x+i, y, ColorWhite); rlcd->RLCD_SetPixel(x+i, y+7, ColorWhite); }
+  for (int i = 0; i < 8; i++) { rlcd->RLCD_SetPixel(x, y+i, ColorWhite); rlcd->RLCD_SetPixel(x+13, y+i, ColorWhite); }
+  rlcd_fill_rect_inv(x+14, y+2, x+16, y+5);  // nub
   int fill = (12 * pct) / 100;
   for (int i = 0; i < fill; i++)
     for (int j = 0; j < 6; j++)
-      rlcd->RLCD_SetPixel(x+1+i, y+1+j, ColorBlack);
+      rlcd->RLCD_SetPixel(x+1+i, y+1+j, ColorWhite);
 }
 
 // Two-row inverted header: row1 = 2x title, row2 = WiFi icon+SSID + temp/humi + battery icon+pct.
