@@ -15,6 +15,7 @@
 | **中文 v3** | `firmware/esp32_llm_zh_v3/` | zh6-raft 15.8M | 中文医学 | 7,563 字符 | `firmware/model_v3/model.bin` (8.92MB) | ✅ | ✅ + CJK |
 
 > v3 = 蒸馏版本（Qwen3-0.6B 数据蒸馏 + RAFT 证据复述），详见 `chinese_v3/docs/PLAN.md`
+> v3 固件复用 v2 分区表（model 0x170000 8.98MB 放 8.92MB model.bin，kb 0xA00000 2MB），特殊 token 在词表末尾（<user>=N-3, <assistant>=N-2, <end>=N-1）
 
 ---
 

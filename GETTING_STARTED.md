@@ -538,15 +538,15 @@ arduino-cli core install esp32:esp32
 
 ### 12.1 烧录前核查：分区表与 model.bin 容量（重要）
 
-> ⚠️ **烧 model.bin 前必须确认它装得进 `model` 分区**。固件用自定义分区表（`PartitionScheme=custom`），model.bin 烧到 `0x110000`，必须落在分区表里那个偏移、且尺寸不超过该分区容量，否则会越界覆盖相邻分区（coredump / 越过 16MB Flash 末尾）导致设备启动异常或数据损坏。
+> ⚠️ **烧 model.bin 前必须确认它装得进 `model` 分区**。固件用自定义分区表（`PartitionScheme=custom`），model.bin 烧到 `0x170000`，必须落在分区表里那个偏移、且尺寸不超过该分区容量，否则会越界覆盖相邻分区（coredump / 越过 16MB Flash 末尾）导致设备启动异常或数据损坏。
 
 **分区表**（`firmware/esp32_llm/partitions.csv`，编译时固化进 `esp32_llm.ino.partitions.bin`）：
 
 ```
 # Name,    Type, SubType, Offset,    Size,      Flags
 nvs,       data, nvs,     0x9000,    0x5000,
-factory,   app,  factory, 0x10000,   0x100000,   # 固件（665KB）
-model,     data, 0x40,    0x110000,  0xEE0000,   # ← model.bin 落这里
+factory,   app,  factory, 0x10000,   0x160000,   # 固件（665KB）
+model,     data, 0x40,    0x170000,  0xE80000,   # ← model.bin 落这里
 coredump,  data, coredump,0xFF0000,  0x10000,
 ```
 
@@ -557,25 +557,25 @@ coredump,  data, coredump,0xFF0000,  0x10000,
 | `0x0` | bootloader | ~20KB | 启动加载器（arduino-cli 自动烧） | ✅ |
 | `0x8000` | partition table | 3KB | 分区表本身（arduino-cli 自动烧） | ✅ |
 | `0x9000` | nvs | 20KB | 非易失配置 | — |
-| `0x10000` | factory | 1MB | **固件**（实测 665KB，余 359KB） | ✅ 放得下 |
-| `0x110000` | **model** | **14.875MB** | **model.bin**（实测 14.22MB，余 0.65MB） | ✅ 放得下 |
+| `0x10000` | factory | 1.375MB | **固件**（实测 665KB，余 ~700KB） | ✅ 放得下 |
+| `0x170000` | **model** | **14.5MB** | **model.bin**（实测 14.22MB，余 0.28MB） | ✅ 放得下 |
 | `0xFF0000` | coredump | 64KB | 崩溃转储，收尾到 16MB | ✅ |
 
 **关键核查（实测，commit 930bde2 / ple-cleandeploy-s42）：**
 
 ```
 model.bin:   14,912,332 bytes  (14.2215 MB)
-model 分区:  15,597,568 bytes  (14.8750 MB)  [0xEE0000]
+model 分区:  15,597,568 bytes  (14.8750 MB)  [0xE80000]
 余量:           685,236 bytes  (0.65 MB)      ← 为正 = 放得下 ✅
-0x110000 % 0x1000 == 0                       ← 4KB 扇区对齐，esptool 可写 ✅
-esptool write_flash 0x110000 == 分区 offset   ← 地址一致 ✅
+0x170000 % 0x1000 == 0                       ← 4KB 扇区对齐，esptool 可写 ✅
+esptool write_flash 0x170000 == 分区 offset   ← 地址一致 ✅
 ```
 
 **自查命令**（烧录前跑一遍，确认你自己的 model.bin 也放得下）：
 
 ```powershell
 $mb = (Get-Item firmware\model\model.bin).Length
-$part = 0xEE0000
+$part = 0xE80000
 "model.bin {0:N0} bytes / partition {1:N0} bytes / 余 {2:N0} bytes" -f $mb, $part, ($part-$mb)
 # 余量为正 = OK；为负 = model.bin 太大，需调大 model 分区或重新量化
 ```
@@ -622,7 +622,7 @@ arduino-cli upload `
 ### 12.4 烧录模型数据
 
 ```powershell
-esptool --chip esp32s3 --port COM3 --baud 921600 write_flash 0x110000 firmware\model\model.bin
+esptool --chip esp32s3 --port COM3 --baud 921600 write_flash 0x170000 firmware\model\model.bin
 ```
 
 > ⚠️ **命令名变更**：esptool 5.x 已把 `esptool.py` 改名为 `esptool`。`COM3` 请替换为 12.2 节实测到的实际端口。
@@ -1161,7 +1161,7 @@ static void display_stats(float tok_s, float ms) {
 |---|---|
 | 编译固件 | `arduino-cli compile --fqbn '...' --build-property compiler.optimization_flags=-O3 --build-path D:\esp32-build firmware\esp32_llm` |
 | 烧录固件 | `arduino-cli upload -p COM3 --fqbn '...' --input-dir D:\esp32-build` |
-| 烧录模型 | `esptool --chip esp32s3 --port COM3 --baud 921600 write_flash 0x110000 firmware\model\model.bin` |
+| 烧录模型 | `esptool --chip esp32s3 --port COM3 --baud 921600 write_flash 0x170000 firmware\model\model.bin` |
 | 串口监视 | `arduino-cli monitor -p COM3 --config baudrate=115200` |
 
 ---

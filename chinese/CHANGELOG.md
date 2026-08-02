@@ -7,6 +7,15 @@
 
 ## v3 环境（蒸馏版本，独立）
 
+### 2026-08-02: V3 固件构建 + 部署文档修正
+- ✅ **v3 固件完成**: `esp32_llm_zh_v3/` 由 v2 结构构建(ino/display/cjk_font/rag.h),
+  vocab.h 7563 词表, 特殊 token 用通用公式 `N-3/N-2/N-1`(词表末尾),
+  DEMO_PROMPT_IDS "糖尿病二型" [269,88,11,358,204], 编译 1347KB ✅
+- 🔧 **分区复用**: v3 model.bin 8.92MB 复用 v2 分区表(model 0x170000 8.98MB 余 0.06MB,
+  kb 0xA00000 2MB), 固件可独立烧录
+- 🔧 **GETTING_STARTED §12 修正**: 过时英文分区 0x110000/0xEE0000/1MB-factory
+  → 实际 0x170000/0xE80000/1.375MB(与 partitions.csv 一致)
+
 ### 2026-08-02: V3 蒸馏完成（P0-P4）
 - ✅ 数据: 7,563 词表（min_freq=1）+ 50K SFT + 99M tokens
 - ✅ zh6 预训练 15.8M（val ppl 22.35）

@@ -1,0 +1,6 @@
+# v2 RAG layout: model 8.5MB (7.71MB binary) + kb 2MB (1.83MB index)
+nvs,       data, nvs,     0x9000,    0x5000,
+factory,   app,  factory, 0x10000,   0x160000,
+model,     data, 0x40,    0x170000,  0x890000,
+kb,        data, 0x41,    0xA00000,  0x200000,
+coredump,  data, coredump,0xFF0000,  0x10000,
