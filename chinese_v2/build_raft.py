@@ -37,8 +37,13 @@ def resolve_env(data_dir):
     KB = DATA_DIR / "kb" / "format_data.jsonl"
 
 
-def encode_raft(tok, evidence, answer):
-    """input = BOS <user> EVIDENCE <end> <assistant> ; target = ANSWER EOS."""
+def encode_raft(tok, evidence, answer, prefix_marker=False):
+    """input = BOS <user> EVIDENCE <end> <assistant> ; target = ANSWER EOS.
+
+    P3: prefix_marker=True wraps evidence in [证据]...[/证据] so the model
+    explicitly learns "bracketed content is to be faithfully reproduced",
+    reducing free-form drift during RAG reproduction.
+    """
     u, a, e = tok.USER, tok.ASSIST, tok.END
 
     def ids_of(text):
@@ -55,6 +60,8 @@ def encode_raft(tok, evidence, answer):
                 ids.append(tok.stoi.get(text[i], UNK)); i += 1
         return ids
 
+    if prefix_marker:
+        evidence = f"[证据]{evidence}[/证据]"
     prefix = ids_of(f"<user>{evidence}<end><assistant>")
     ans = ids_of(answer)
     input_ids = [BOS] + prefix + ans + [EOS]
@@ -70,6 +77,8 @@ def main():
     ap.add_argument("--val-count", type=int, default=2000)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--data-dir", default=None, help="Env data dir (e.g. data_v3)")
+    ap.add_argument("--prefix-marker", action="store_true",
+                    help="P3: wrap evidence in [证据]...[/证据] marker")
     args = ap.parse_args()
     resolve_env(args.data_dir)
 
@@ -100,7 +109,8 @@ def main():
         for q, a in items:
             evidence = a[:EVIDENCE_CHARS]      # self-grounded evidence
             answer = a[:MAX_ANSWER]
-            input_ids, labels = encode_raft(tok, evidence, answer)
+            input_ids, labels = encode_raft(tok, evidence, answer,
+                                            prefix_marker=args.prefix_marker)
             enc.append({"input_ids": input_ids, "labels": labels})
         return enc
 
