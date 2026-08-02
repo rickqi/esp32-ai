@@ -511,7 +511,9 @@ static int sample_token(float *logits, int n, float temp, int topk, uint32_t *rn
 static int rag_augment_prompt() {
   if (!rag_ready) return 0;
   uint16_t kb_docs[RAG_TOP_K][48];
-  int nd = rag_retrieve_for_question(kb_docs, RAG_TOP_K);
+  // P2: inject Top-1 only (Top-2+ can dilute with lower-relevance evidence;
+  // verified: answer-only Top-1 already contains the complete answer).
+  int nd = rag_retrieve_for_question(kb_docs, 1);
   if (nd == 0) return 0;
 
   int uid = VOCAB_N - 3;  // <user>
