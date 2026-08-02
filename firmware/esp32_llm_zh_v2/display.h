@@ -642,9 +642,13 @@ static void rlcd_draw_battery_icon(int x, int y, int pct) {
 
 // Two-row inverted header: row1 = 2x title, row2 = WiFi icon+SSID + temp/humi + battery icon+pct.
 static void display_draw_header(const char *wifi_status, int bat_pct, float temp, float humi) {
-  // Row 1: 2x title bar
+  // Row 1: 2x title bar (title centered on the 400px-wide screen)
   rlcd_fill_rect(TUI_LEFT+1, HDR_Y1, TUI_RIGHT-1, HDR_Y2);
-  rlcd_draw_text_2x_inv(TEXT_LEFT, HDR_Y1+1, "ESP32-S3 PLE LLM");
+  const char *title = "ESP32-S3 PLE LLM";
+  int tw = strlen(title) * CW2;                       // 2x title width (15*12=180)
+  int tx = TEXT_LEFT + (TEXT_RIGHT - TEXT_LEFT - tw) / 2;  // center in frame
+  if (tx < TEXT_LEFT) tx = TEXT_LEFT;
+  rlcd_draw_text_2x_inv(tx, HDR_Y1+1, title);
   // Row 2: 1x sensor strip
   rlcd_fill_rect(TUI_LEFT+1, HDR2_Y1, TUI_RIGHT-1, HDR2_Y2);
   int y = HDR2_Y1 + 1;
@@ -733,11 +737,12 @@ static void display_draw_footer(float tok_s, float ms) {
   // Latency: "%3.0f" + "ms" = 5 chars at x+7*CW+6 = x+48
   snprintf(buf, sizeof(buf), "%3.0fms", round(ms));
   rlcd_draw_text_inv(x + 48, y, buf);
-  // Model: param count.  v2 Chinese model (V=6594 D=160 L=8 F=244 P=192)
-  // is 13.68M -- NOT the English model's 28.9M.  Derived from VOCAB_N so
-  // the footer always reflects the actually-flashed model.
-#if VOCAB_N >= 6500
-  rlcd_draw_text_inv(x + 84, y, "13.7M");   // zh5-med (v2)
+  // Model: actual param count, derived from VOCAB_N (v1 5904->12.5M,
+  // v2 6594->13.7M, v3 7563->15.8M).  NOT the English model's 28.9M.
+#if VOCAB_N >= 7000
+  rlcd_draw_text_inv(x + 84, y, "15.8M");   // zh6-raft (v3)
+#elif VOCAB_N >= 6500
+  rlcd_draw_text_inv(x + 84, y, "13.7M");   // zh5-multi2 (v2)
 #else
   rlcd_draw_text_inv(x + 84, y, "12.5M");   // zh4-ds (v1)
 #endif

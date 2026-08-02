@@ -102,6 +102,10 @@ static int line_pos = 0;              // current position in line_buf
 static RagIndex rag;
 static bool rag_ready = false;
 
+// Global accessors for display.h footer (RAG status without exposing RagIndex).
+bool rag_is_ready() { return rag_ready; }
+uint32_t rag_doc_count() { return rag.n_docs; }
+
 static void rag_init() {
   const esp_partition_t *kb = esp_partition_find_first(
       ESP_PARTITION_TYPE_DATA, (esp_partition_subtype_t)0x41, "kb");
