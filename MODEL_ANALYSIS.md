@@ -280,6 +280,19 @@ labels: 只计算答案部分（loss masking，右移一位）
 | v2 中文 | zh5 | 13.7M | 12.13 | 干净医学数据 |
 | v2 中文 | zh5-multi2 | 13.7M | 7.0 | 多源 SFT |
 | v2 中文 | ple-raft | 13.7M | 2.6 | RAFT 证据复述 |
+| **v3 中文（计划）** | **zh6-distill** | **24M** | — | **Qwen3-0.6B 蒸馏**（详见 chinese_v3/docs/PLAN.md） |
+
+### V3 蒸馏计划（2026-08-02）
+
+```
+目标: 24M PLE 学生（int4 ~12MB，单台 ESP32）
+蒸馏源: Qwen3-0.6B（WSL 已有环境）
+方法: 数据蒸馏（50K QA）+ Logits 蒸馏（CE + KL）
+独立目录: chinese_v3/ + data_v3/ + runs_v3/（与 v2 完全隔离）
+参考: chinese_v3/docs/PLAN.md
+
+演进: 单台 24M（能力 1.5×）→ 后续 2 台 48M 流水线（能力 3×）
+```
 
 ## 附：关键文件索引
 
