@@ -750,13 +750,13 @@ static void display_draw_footer(float tok_s, float ms, int ntok, int64_t total_u
     snprintf(buf, sizeof(buf), "RAG%uK", (unsigned)(rag_doc_count() / 1000));
   else
     snprintf(buf, sizeof(buf), "noRAG");
-  rlcd_draw_text_inv(x + 120, y, buf);
+  rlcd_draw_text_inv(x + 126, y, buf);   // x=133, gap 6px after V(91..127)
   // Tokens generated this run: "N<ntok>" (e.g. N150).
   snprintf(buf, sizeof(buf), "N%d", ntok);
-  rlcd_draw_text_inv(x + 156, y, buf);
+  rlcd_draw_text_inv(x + 168, y, buf);   // x=175, gap 6px after RAG
   // Generation wall time: "<sec>s" (e.g. 42s).
   snprintf(buf, sizeof(buf), "%ds", (int)(total_us / 1000000));
-  rlcd_draw_text_inv(x + 192, y, buf);
+  rlcd_draw_text_inv(x + 204, y, buf);   // x=211, gap 6px after Ntok
   // Date/time from system clock (set by PCF85063 RTC via settimeofday,
   // or defaults to 0 if no RTC).  Format: "MM/DD HH:MM" (11 chars, right-anchored).
   time_t now = time(NULL);

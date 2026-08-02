@@ -267,7 +267,7 @@ static int read_battery_pct() {
 
 // ---- serial prompt ----------------------------------------------------------
 // Default demo prompt used when PROMPT_TIMEOUT_MS expires.
-static const int DEMO_PROMPT_IDS[] = {269, 88, 11, 358, 204};   // "糖尿病二型" (v3 vocab)
+static const int DEMO_PROMPT_IDS[] = {66, 1109, 16, 838};   // "感冒发烧" (v3 vocab)
 static const int DEMO_N_GENERATE = 200;
 
 // Emit one token to every active output (serial always; TFT when enabled).
@@ -462,9 +462,9 @@ static int parse_json_prompt(const char *json, int *ids, int *n, int *max) {
 // small Chinese model loop on EOS; sampling escapes the attractor and produces
 // varied text.  Repetition penalty (like sft_generate.py) suppresses degenerate
 // loops ("痞痞痞..." / block repetition) on the quantized models.
-#define SAMPLING_TEMP  0.7f
+#define SAMPLING_TEMP  0.6f
 #define SAMPLING_TOPK  40
-#define REPETITION_PENALTY 1.4f
+#define REPETITION_PENALTY 1.5f
 #define HIST_WINDOW    50      // penalize tokens seen in the last 50 positions
 static uint32_t rng_state = 42;
 static uint32_t xrng() {
