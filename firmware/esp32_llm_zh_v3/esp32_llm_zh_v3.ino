@@ -657,7 +657,8 @@ static void run_generation() {
   // Erase the live generation cursor so no stray vertical bar remains next to
   // the last character, then draw the footer bar (does NOT clear the story).
   display_clear_cursor();
-  display_draw_footer(decoded * 1e6f / decode_us, decode_us / 1000.0f / decoded);
+  display_draw_footer(decoded * 1e6f / decode_us, decode_us / 1000.0f / decoded,
+                      decoded, total_us);
 #endif
 
   // JSON completion marker: the PC script recognises this as end-of-stream.

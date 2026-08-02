@@ -725,29 +725,24 @@ static void display_draw_prompt_2x(const char *prefix, const unsigned char *body
 
 // Inverted footer bar: fixed-position, fixed-width fields.
 // All fields occupy PRECISE pixel positions, no wrapping, no overflow.
-// Layout (CW=6):  TP=7ch | Ms=5ch | MP=5ch | HW=8ch | [flex] | DT=10ch(right-aligned)
-static void display_draw_footer(float tok_s, float ms) {
+// Layout (CW=6):  TP=7ch | Ms=5ch | Model=6ch | RAG=5ch | Ntok=5ch | Time=4ch | [flex] | DT=11ch(right-aligned)
+static void display_draw_footer(float tok_s, float ms, int ntok, int64_t total_us) {
   for (int x = TUI_LEFT+1; x < TUI_RIGHT; x++) rlcd->RLCD_SetPixel(x, DIV3_Y, ColorBlack);  // sep line
   rlcd_fill_rect(TUI_LEFT, FTR_Y1, TUI_RIGHT, FTR_Y2);
   int x = TEXT_LEFT, y = FTR_Y1 + 2;
   // Throughput: "%5.1f" + "t/s" = 7 chars at fixed x
-  char buf[16];
+  char buf[20];
   snprintf(buf, sizeof(buf), "%5.1ft/s", tok_s);  // " 9.5t/s" or "10.5t/s" (7 chars)
   rlcd_draw_text_inv(x, y, buf);
   // Latency: "%3.0f" + "ms" = 5 chars at x+7*CW+6 = x+48
   snprintf(buf, sizeof(buf), "%3.0fms", round(ms));
   rlcd_draw_text_inv(x + 48, y, buf);
-  // Model: actual param count, derived from VOCAB_N (v1 5904->12.5M,
-  // v2 6594->13.7M, v3 7563->15.8M).  NOT the English model's 28.9M.
-#if VOCAB_N >= 7000
-  rlcd_draw_text_inv(x + 84, y, "15.8M");   // zh6-raft (v3)
-#elif VOCAB_N >= 6500
-  rlcd_draw_text_inv(x + 84, y, "13.7M");   // zh5-multi2 (v2)
-#else
-  rlcd_draw_text_inv(x + 84, y, "12.5M");   // zh4-ds (v1)
-#endif
-  // RAG status (v3 has device-side retrieval): "RAG 10K" when index loaded,
-  // "noRAG" when kb partition/index missing.  Replaces fixed hardware label.
+  // Model: vocab size, derived from VOCAB_N (v1 5904, v2 6594, v3 7563).
+  // More precise than param count (12.5M/13.7M/15.8M) for identifying the model.
+  snprintf(buf, sizeof(buf), "V%u", (unsigned)VOCAB_N);
+  rlcd_draw_text_inv(x + 84, y, buf);
+  // RAG status (v3 has device-side retrieval): "RAG10K" when index loaded,
+  // "noRAG" when kb partition/index missing.
   // rag_is_ready()/rag_doc_count() are globals in the .ino.
   extern bool rag_is_ready();
   extern uint32_t rag_doc_count();
@@ -756,6 +751,12 @@ static void display_draw_footer(float tok_s, float ms) {
   else
     snprintf(buf, sizeof(buf), "noRAG");
   rlcd_draw_text_inv(x + 120, y, buf);
+  // Tokens generated this run: "N<ntok>" (e.g. N150).
+  snprintf(buf, sizeof(buf), "N%d", ntok);
+  rlcd_draw_text_inv(x + 156, y, buf);
+  // Generation wall time: "<sec>s" (e.g. 42s).
+  snprintf(buf, sizeof(buf), "%ds", (int)(total_us / 1000000));
+  rlcd_draw_text_inv(x + 192, y, buf);
   // Date/time from system clock (set by PCF85063 RTC via settimeofday,
   // or defaults to 0 if no RTC).  Format: "MM/DD HH:MM" (11 chars, right-anchored).
   time_t now = time(NULL);
