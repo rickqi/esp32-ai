@@ -22,12 +22,12 @@ typedef struct {
   float rope_theta;
 } Cfg;
 
-// A group-wise int4 tensor viewed in place: ragged packed nibbles (row-aligned
-// to a byte) + fp16 group scales. Per-tensor group. No padding.
+// A group-wise intN tensor viewed in place: ragged packed codes (4-bit: nibbles
+// 2-per-byte; 8-bit: one byte per value) + fp16 group scales. Per-tensor group.
 typedef struct {
-  const uint8_t  *codes;   // rows*row_bytes, nibble = value+8, row_bytes=ceil(cols/2)
+  const uint8_t  *codes;   // rows*row_bytes
   const uint16_t *scales;  // rows*n_groups fp16
-  int rows, cols, group, n_groups, row_bytes;
+  int rows, cols, group, n_groups, row_bytes, bits;
 } QT;
 
 // IEEE half -> float.
@@ -68,12 +68,13 @@ typedef struct {
 } Model;
 
 // Advance a cursor over the file, binding one quant tensor. Reads the per-tensor
-// group prefix, then ragged codes + fp16 scales.
+// bits (1 byte) + group prefix, then codes + fp16 scales.
 static const uint8_t *bind_q(const uint8_t *p, QT *t, int rows, int cols) {
+  t->bits = *p; p += 1;
   int32_t group; memcpy(&group, p, 4); p += 4;
   t->rows = rows; t->cols = cols; t->group = group;
   t->n_groups = (cols + group - 1) / group;
-  t->row_bytes = (cols + 1) / 2;
+  t->row_bytes = (t->bits == 8) ? cols : (cols + 1) / 2;
   t->codes = p;  p += (size_t)rows * t->row_bytes;
   t->scales = (const uint16_t *)p;  p += (size_t)rows * t->n_groups * 2;
   return p;
@@ -82,8 +83,21 @@ static const uint8_t *bind_f(const uint8_t *p, const float **t, int n) {
   *t = (const float *)p;  return p + (size_t)n * sizeof(float);
 }
 
-// Dequantize row r of a quant tensor into out[cols].
+// Dequantize row r of a quant tensor into out[cols]. Supports 4-bit and 8-bit.
 static inline void deq_row(const QT *t, int r, float *out) {
+  if (t->bits == 8) {
+    const uint8_t *row = t->codes + (size_t)r * t->row_bytes;
+    const uint16_t *sc = t->scales + (size_t)r * t->n_groups;
+    for (int gi = 0; gi < t->n_groups; gi++) {
+      int begin = gi * t->group;
+      int end = begin + t->group;
+      if (end > t->cols) end = t->cols;
+      float scale = half2float(sc[gi]);
+      for (int j = begin; j < end; j++)
+        out[j] = (float)((int8_t)row[j]) * scale;  // signed int8
+    }
+    return;
+  }
   const uint8_t *row = t->codes + (size_t)r * t->row_bytes;
   const uint16_t *sc = t->scales + (size_t)r * t->n_groups;
   for (int gi = 0; gi < t->n_groups; gi++) {
@@ -111,7 +125,7 @@ static inline void deq_row(const QT *t, int r, float *out) {
 
 // y[row_begin:row_end] = W * x for a quant tensor W. Keeping the row range
 // explicit lets platforms parallelize the large output head without changing
-// any individual dot product.
+// any individual dot product. Supports 4-bit and 8-bit codes.
 static inline void matvec_q_range(const QT *t, const float *x, float *y,
                                   int row_begin, int row_end) {
   for (int r = row_begin; r < row_end; r++) {
@@ -124,20 +138,25 @@ static inline void matvec_q_range(const QT *t, const float *x, float *y,
       if (end > t->cols) end = t->cols;
       float scale = half2float(sc[gi]);
       float group_acc = 0.f;
-      int j = begin;
-      if ((j & 1) && j < end) {
-        group_acc += (float)((row[j >> 1] >> 4) - 8) * x[j];
-        j++;
-      }
-      for (; j + 1 < end; j += 2) {
-        uint8_t byte = row[j >> 1];
-        group_acc += (float)((byte & 0xF) - 8) * x[j];
-        group_acc += (float)((byte >> 4) - 8) * x[j + 1];
-      }
-      if (j < end) {
-        uint8_t byte = row[j >> 1];
-        int code = (j & 1) ? (byte >> 4) : (byte & 0xF);
-        group_acc += (float)(code - 8) * x[j];
+      if (t->bits == 8) {
+        for (int j = begin; j < end; j++)
+          group_acc += (float)((int8_t)row[j]) * x[j];
+      } else {
+        int j = begin;
+        if ((j & 1) && j < end) {
+          group_acc += (float)((row[j >> 1] >> 4) - 8) * x[j];
+          j++;
+        }
+        for (; j + 1 < end; j += 2) {
+          uint8_t byte = row[j >> 1];
+          group_acc += (float)((byte & 0xF) - 8) * x[j];
+          group_acc += (float)((byte >> 4) - 8) * x[j + 1];
+        }
+        if (j < end) {
+          uint8_t byte = row[j >> 1];
+          int code = (j & 1) ? (byte >> 4) : (byte & 0xF);
+          group_acc += (float)(code - 8) * x[j];
+        }
       }
       acc += group_acc * scale;
     }

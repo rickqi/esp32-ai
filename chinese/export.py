@@ -23,7 +23,39 @@ sys.path.insert(0, str(SRC))
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from model import Config, TinyLM  # noqa: E402
-from export import quant_pack  # noqa: E402  (exact same packing as English)
+from export import quant_pack  # noqa: E402  (4-bit packing from src)
+
+# 8-bit group-wise quant pack (for dense core tensors — higher precision).
+def quant_pack_8(w, group=32):
+    """Group-wise symmetric int8 with fp16 scales. codes = signed int8 bytes."""
+    w = w.float()
+    out_shape = w.shape
+    x = w.reshape(-1, out_shape[-1])
+    rows, cols = x.shape
+    n_groups = (cols + group - 1) // group
+    q = torch.zeros(rows, cols, dtype=torch.int8)
+    dq = torch.zeros(rows, cols)
+    scales = torch.zeros(rows, n_groups)
+    for gi in range(n_groups):
+        a, b = gi * group, min((gi + 1) * group, cols)
+        seg = x[:, a:b]
+        sc = (seg.abs().amax(dim=1, keepdim=True) / 127.0).clamp_min(1e-8)
+        sc = sc.half().float()
+        scales[:, gi] = sc.squeeze(1)
+        qi = torch.clamp(torch.round(seg / sc), -127, 127).to(torch.int8)
+        q[:, a:b] = qi
+        dq[:, a:b] = qi.float() * sc
+    dq = dq.reshape(out_shape)
+    codes = q.numpy()  # rows x cols int8
+    scales16 = scales.numpy().astype(np.float16)
+    return codes.reshape(-1), scales16.reshape(-1), dq
+
+
+# Which tensors are "dense core" (upgrade to 8-bit) vs "table" (keep 4-bit)?
+def tensor_is_core(name):
+    return ("attn." in name or "ffn." in name or
+            "ple_gate" in name or "ple_proj" in name or
+            "ple_model_proj" in name)
 
 RUNS = PROJECT_ROOT / "runs_chinese"
 OUT = PROJECT_ROOT / "firmware" / "model_chinese"
@@ -57,6 +89,8 @@ def main():
     ap.add_argument("tag", nargs="?", default="ple-zh-s42")
     ap.add_argument("--runs-dir", default=None, help="Env runs dir (e.g. runs_v2)")
     ap.add_argument("--out-dir", default=None, help="Env out dir (e.g. firmware/model_v2)")
+    ap.add_argument("--core-bits", type=int, default=4,
+                    help="Bits for dense core tensors (4 or 8; P0 mixed quant)")
     args = ap.parse_args()
     tag = args.tag
     resolve_env(args.runs_dir, args.out_dir)
@@ -123,15 +157,17 @@ def main():
                   f"{torch.isinf(t).sum().item()} Inf")
             t = torch.nan_to_num(t, nan=0.0, posinf=0.0, neginf=0.0)
         if quant:
-            # NOTE: must pass group=GROUP explicitly -- src/export.py's quant_pack
-            # defaults to its own GROUP=128, which would pack with the wrong
-            # group size vs the 32 written to the header, corrupting the layout
-            # (C side then misparses scales -> NaN on device).
-            packed, scales, dq = quant_pack(t, group=GROUP)
+            # P0: optional mixed quant — core at 8-bit. GPU-verified no quality
+            # gain (P2 answer-only index already removed noise), default 4-bit.
+            bits = args.core_bits if tensor_is_core(name) else 4
+            if bits == 8:
+                packed, scales, dq = quant_pack_8(t, group=GROUP)
+            else:
+                packed, scales, dq = quant_pack(t, group=GROUP)
             dq_sd[name] = dq
-            blobs.append(("Q", name, t.shape, packed, scales))
+            blobs.append(("Q", name, t.shape, packed, scales, bits))
         else:
-            blobs.append(("F", name, t.shape, t.contiguous().numpy().astype(np.float32), None))
+            blobs.append(("F", name, t.shape, t.contiguous().numpy().astype(np.float32), None, 0))
 
     path = OUT / "model.bin"
     with open(path, "wb") as f:
@@ -143,12 +179,13 @@ def main():
         for entry in blobs:
             kind = entry[0]
             if kind == "Q":
-                _, _, _, packed, scales = entry
+                _, _, _, packed, scales, bits = entry
+                f.write(struct.pack("<B", bits))   # P0: per-tensor bits
                 f.write(struct.pack("<i", GROUP))
                 f.write(packed.tobytes())
                 f.write(scales.tobytes())
             else:
-                _, _, _, arr, _ = entry
+                _, _, _, arr, _, _ = entry
                 f.write(arr.tobytes())
     size = os.path.getsize(path)
     print(f"wrote {path}  ({size/1e6:.2f} MB)  {len(plan)} tensors")
