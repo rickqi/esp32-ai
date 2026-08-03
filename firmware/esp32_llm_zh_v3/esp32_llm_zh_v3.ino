@@ -18,7 +18,8 @@
 #define LLM_PROFILE_NOW() esp_timer_get_time()
 #include "../common/llm.h"
 #include "vocab.h"
-#include "rag.h"   // device-side TF-IDF retrieval
+#include "rag.h"     // device-side TF-IDF retrieval (flash kb partition)
+#include "rag_sd.h"  // deep-search retrieval over SD-card full KB
 
 // ---- SD card logging (Waveshare RLCD-4.2: SDMMC, CLK=38 CMD=21 D0=39) ------
 // Writes every generation (prompt + output) as UTF-8 to /sdcard/logs/llm.log,
@@ -505,15 +506,88 @@ static int sample_token(float *logits, int n, float temp, int topk, uint32_t *rn
   for (int i = n - 1; i >= 0; i--) if (logits[i] >= mx) return i;
   return 0;
 }
+// Global deep-search flag (set by JSON "deep":true before run_generation).
+static bool rag_deep = false;
+
+// Convert a UTF-8 char (1-3 bytes) to a vocab token id via VOCAB_BLOB scan.
+// Returns token id, or -1 if the char is not in vocab.
+static int utf8_to_token_id(const unsigned char *s, int len) {
+  for (int t = 4; t < VOCAB_N; t++) {
+    int tl = VOCAB_OFF[t + 1] - VOCAB_OFF[t];
+    if (tl != len) continue;
+    if (memcmp(VOCAB_BLOB + VOCAB_OFF[t], s, (size_t)len) == 0) return t;
+  }
+  return -1;
+}
+
+// Append SD evidence doc (UTF-8) to tmp[] as vocab token ids.
+// Returns 1 on success (some tokens appended), 0 on failure.
+static int append_sd_evidence(const char *utf8, int *tmp, int *nb, int cap) {
+  int o = 0;
+  const unsigned char *p = (const unsigned char *)utf8;
+  while (p[o] && *nb < cap) {
+    int clen;
+    unsigned char b0 = p[o];
+    if (b0 < 0x80) clen = 1;
+    else if ((b0 & 0xE0) == 0xC0) clen = 2;
+    else if ((b0 & 0xF0) == 0xE0) clen = 3;
+    else { o++; continue; }
+    int tid = utf8_to_token_id(p + o, clen);
+    if (tid >= 0) tmp[(*nb)++] = tid;
+    o += clen;
+  }
+  return o > 0 ? 1 : 0;
+}
+
 // Retrieve KB evidence and prepend it to the prompt: builds a new id sequence
 //   BOS <user> [KB1][KB2] QUESTION <end> <assistant>
 // Returns the new length (0 = no evidence found, keep original prompt).
 static int rag_augment_prompt() {
-  if (!rag_ready) return 0;
   uint16_t kb_docs[RAG_TOP_K][48];
   // P2: Top-1-only was tested on device and REGRESSED (short/empty outputs:
   // 癌症肿瘤->12 tok, 感冒如何->empty, 肺癌早期症状->9 tok). Top-2 provides
   // redundancy for the raft model to paraphrase; keep RAG_TOP_K=3, use top 2.
+
+  // ---- deep search (SD full KB) first, if requested ----
+  if (rag_deep && g_rag_sd.ready) {
+    char qbuf[160];
+    decode_question(qbuf, sizeof(qbuf));
+    if (qbuf[0]) {
+      uint32_t sd_best[RAGSD_TOP_K];
+      int sd_scores[RAGSD_TOP_K];
+      int n = ragsd_retrieve(qbuf, sd_best, sd_scores, 2);
+      if (n > 0) {
+        int uid = VOCAB_N - 3, eid = VOCAB_N - 1, aid = VOCAB_N - 2;
+        int nb = 0;
+        int tmp[MAX_PROMPT_IDS];
+        tmp[nb++] = 2;                                   // BOS
+        tmp[nb++] = uid;
+        for (int k = 0; k < n && nb < MAX_PROMPT_IDS - 16; k++) {
+          char doc[RAGSD_DOC_CAP + 1];
+          int clen = ragsd_read_doc(sd_best[k], doc, sizeof(doc));
+          if (clen > 0) {
+            append_sd_evidence(doc, tmp, &nb, MAX_PROMPT_IDS - 16);
+            if (nb < MAX_PROMPT_IDS - 16) tmp[nb++] = '\n';
+          }
+        }
+        // original question
+        for (int i = 0; i < recv_n && nb < MAX_PROMPT_IDS - 8; i++) {
+          int t = recv_ids[i];
+          if (t == 2 || t == uid || t == eid || t == aid) continue;
+          tmp[nb++] = t;
+        }
+        tmp[nb++] = eid;
+        tmp[nb++] = aid;
+        memcpy(recv_ids, tmp, nb * sizeof(int));
+        recv_n = nb;
+        Serial.printf("[RAG-SD] deep: %d evidence docs\n", n);
+        return nb;
+      }
+    }
+  }
+
+  // ---- default: flash kb partition ----
+  if (!rag_ready) return 0;
   int nd = rag_retrieve_for_question(kb_docs, 2);
   if (nd == 0) return 0;
 
@@ -781,6 +855,13 @@ void setup() {
                 heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024);
 
   rag_init();  // load device-side KB index (mmap "kb" partition)
+  if (sd_ok) {
+    int rrc = ragsd_init();  // deep-search SD full KB (if index present)
+    if (rrc == 0) Serial.println("RAG-SD: deep index ready (SD card)");
+    else Serial.printf("RAG-SD: init failed (%d) — flash RAG only\n", rrc);
+  } else {
+    Serial.println("RAG-SD: no SD — flash RAG only");
+  }
 
   // ---- ready for serial prompt input ----
   Serial.println("{\"ready\":true}");
@@ -821,7 +902,9 @@ void loop() {
         sd_log_dump();   // dump SD log (UTF-8) over serial
       }
       else if (line_buf[0] == '{' && parse_json_prompt(line_buf, recv_ids, &recv_n, &recv_max) == 0) {
+        rag_deep = (strstr(line_buf, "\"deep\":true") != NULL);  // deep search flag
         run_generation();
+        rag_deep = false;
         Serial.println("{\"ready\":true}");           // signal ready for next prompt
       }
       break;

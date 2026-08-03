@@ -5,6 +5,41 @@
 
 ---
 
+## V4 环境（临床指南整合，独立）
+
+### 2026-08-03: V4 中文环境建立 — 临床指南数据整合
+- 🧬 **新环境 `chinese_v4/` + `data_v4/`**: 完全隔离 (遵循多环境模式)
+- 📚 **语料扩充**: 临床诊疗指南全集(40 md) + medica(363 md) + V2 语料
+  → corpus 130.35M tokens (V2 的 99.3M +31%), 词表 8196 (V3 的 7563 +633)
+- 🎯 **SFT 数据**: 50K = 6K 指南 QA + 30K zjydiary + 8K BenTsao + 20K HuatuoGPT2
+  (指南 QA: 章节标题→问句 + 章节正文, 新增 RE_NOISE_HEAD/RE_CLINICAL_HEAD 过滤)
+- 🗂️ **KB**: 11K docs (8K 指南 + 3K V3), index.bin 1.97MB (2MB 分区内)
+- 🏋️ **训练链**: zh7 预训练 ppl **11.59** (V3: 22.35) → SFT ppl **7.1** (9.2) → RAFT ppl **1.0** (2.7)
+- 📦 **产物**: model.bin 8.81MB (16.4M params), 主机 verify **PASS**
+- ⚠️ **发现**: model.bin 8.81MB > model 分区 8.56MB → 需扩分区 (0x170000 size 0x8F0000)
+
+### 2026-08-03: SD 扩展索引（全量 KB, 双索引 RAG）
+- 🔍 **触发机制分析**: 实测 12+ 问题证明 绝对分数/覆盖率/top-ratio **均不可靠**
+  (分数带交叠 1401-2670 vs 1414-2090, IDF 84% 饱和, 覆盖率全 1.00)
+  → **采用显式 `"deep":true` 为唯一触发方式**
+- 🗄️ **SD 索引构建** (`chinese_v4/kb/build_sd_index.py`): 单字倒排
+  index.bin(term表 59KB 常驻 + doclists 流式) + docs.bin(偏移表 O(1) 定位) + meta.bin
+- 📊 **全量 136,877 docs** (V3 93,502 + 指南 43,375 突破 8K 上限)
+  index 34.8MB + docs 17.4MB (~52MB SD 卡存储)
+- ✅ **检索质量提升**: 肺癌/白疕/带状疱疹命中修正, 宫外孕→妇产科
+
+### 2026-08-03: 固件 deep 检索集成 (rag_sd.h)
+- 🛠️ **`firmware/esp32_llm_zh_v3/rag_sd.h`**: SD 倒排检索器
+  - term 表(59KB) 常驻 PSRAM, doclists 流式 fread, 哈希表(2^18桶)打分
+  - 遵循 ESP-IDF 性能指南: POSIX read/lseek, 内部 SRAM I/O 缓冲
+  - 主机验证 `verify_ragsd.c`: 分数与 Python 参考完全一致 (PASS)
+- 🔌 **`.ino` 集成**: `rag_deep` 全局标志, JSON `"deep":true` 触发,
+  `utf8_to_token_id()`/`append_sd_evidence()` 证据注入, setup() 调 ragsd_init()
+- 🏗️ **编译**: esp32_llm_zh_v3.ino.bin 1381KB ✅
+- 🐛 **修复**: 编译 libsdetect 死锁 (arduino-cli 1.5.1 Windows bug) → 复用旧 build 目录增量编译
+
+---
+
 ## v3 环境（蒸馏版本，独立）
 
 ### 2026-08-02: P3 RAFT 格式对齐落地（zh6-raft3）

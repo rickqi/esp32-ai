@@ -145,9 +145,17 @@ def serialize(docs, inverted, idf, out_dir):
         for t in terms:
             f.write(struct.pack(f"<{len(inverted[t])}I", *inverted[t]))
 
-    # ---- docs.bin ----
+    # ---- docs.bin: [u32 n_docs][u32 doc_off[n_docs+1]][docs...] ----
+    # doc_off table enables O(1) fseek to any doc (137K docs, no linear scan)
     with open(out_dir / "docs.bin", "wb") as f:
+        # compute offsets
+        body_start = 4 + (len(docs) + 1) * 4
+        offs = [0] * (len(docs) + 1)
+        offs[0] = body_start
+        for i, (doc, label) in enumerate(docs):
+            offs[i + 1] = offs[i] + 4 + len(doc.encode("utf-8")) + len(label.encode("utf-8")[:20])
         f.write(struct.pack("<I", len(docs)))
+        f.write(struct.pack(f"<{len(offs)}I", *offs))
         for doc, label in docs:
             tb = doc.encode("utf-8")
             lb = label.encode("utf-8")[:20]
@@ -192,9 +200,12 @@ def load_index(out_dir):
             doclists[t] = struct.unpack(f"<{cnt}I", f.read(cnt * 4))
 
     docs = []
+    doc_off = []
     with open(out_dir / "docs.bin", "rb") as f:
         n_docs = struct.unpack("<I", f.read(4))[0]
-        for _ in range(n_docs):
+        doc_off = struct.unpack(f"<{n_docs+1}I", f.read((n_docs + 1) * 4))
+        for i in range(n_docs):
+            f.seek(doc_off[i])
             tl, ll = struct.unpack("<HH", f.read(4))
             t = f.read(tl).decode("utf-8")
             label = f.read(ll).decode("utf-8")
