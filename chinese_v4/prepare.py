@@ -116,7 +116,11 @@ def clean_guide_md(text: str) -> str:
             continue
         # digit-heavy rows (ICD codes etc)
         n = len(s)
-        if n > 0 and sum(ch.isdigit() for ch in s) / n > 0.35:
+        digits = 0
+        for ch2 in s:
+            if ch2.isdigit():
+                digits += 1
+        if n > 0 and digits / n > 0.35:
             continue
         if s.count("|") >= 3:
             continue

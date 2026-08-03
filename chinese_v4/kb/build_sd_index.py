@@ -4,10 +4,10 @@ chinese_v4 SD 扩展索引构建 — 全量 KB → index.bin/docs.bin/meta.bin (
 格式定型 (基于 IDF 84% 饱和 + PSRAM 预算分析):
   index.bin:
     [u16 n_terms]
-    term table (常驻 PSRAM ~18KB):  每 term: u8 len + UTF-8 + u32 doclist_offset + u16 doc_count
-    doclists (流式, SD 卡):          每 term: u16 doc_id[]
+    term table (常驻 PSRAM ~18KB):  每 term: u8 len + UTF-8 + u32 doclist_offset + u32 doc_count
+    doclists (流式, SD 卡):          每 term: u32 doc_id[]  (全量 137K docs 需 u32)
   docs.bin:
-    [u16 n_docs] 每 doc: u16 len + UTF-8 (evidence)
+    [u32 n_docs] 每 doc: u16 len + UTF-8 (evidence)
   meta.bin:
     [u32 N] [u16 n_terms] 每 term: u8 len + UTF-8 + u8 idf
 
@@ -40,15 +40,23 @@ OUT_DIR = DATA_V4 / "sd_rag"
 DOC_CHARS = 40          # evidence block length (prompt budget)
 IDF_SCALE = 64.0
 
-
-def build_ngrams(text):
-    """Unigram terms only (medical char set is bounded)."""
-    return set(text)
+# 全量 KB 来源: 独立 SD 索引应合并全量 V3 + 全量指南 (突破 flash 2MB 采样上限)
+V3_KB = Path("/mnt/d/codes/esp32-ai/data_v3/kb/format_data.jsonl")
+GUIDE_DIR = Path("/mnt/d/docs/raw/临床诊疗指南全集")
+MEDICA_DIR = Path("/mnt/d/docs/raw/medica")
 
 
 def load_entries(max_docs):
+    """Load FULL KB: all V3 entries + all guide sections (no partition cap)."""
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+    from chinese_v4.kb.build_guide_kb import RE_NOISE_HEAD
+    from chinese_v4.build_sft import split_by_headings, heading_to_questions
+    from chinese_v4.prepare import clean_guide_md
+
     entries = []
-    with open(KB, encoding="utf-8", errors="replace") as f:
+    # 1. all V3 KB entries
+    with open(V3_KB, encoding="utf-8", errors="replace") as f:
         for line in f:
             try:
                 d = json.loads(line)
@@ -60,8 +68,37 @@ def load_entries(max_docs):
             if len(q) >= 3 and len(a) >= 20:
                 entries.append((q, a, label))
             if max_docs and len(entries) >= max_docs:
-                break
+                return entries
+    print(f"  V3 entries: {len(entries)}")
+
+    # 2. all guide sections (full extraction, no 8K cap)
+    for d in (GUIDE_DIR, MEDICA_DIR):
+        if not d.exists():
+            continue
+        mds = [m for m in d.rglob("*.md")
+               if "_index" not in m.name and "_ocr" not in m.name]
+        for m in mds:
+            raw = m.read_text(encoding="utf-8", errors="replace")
+            cleaned = clean_guide_md(raw)
+            label = "临床指南"
+            for level, head, body in split_by_headings(cleaned):
+                body_text = "\n".join(body).strip()
+                if len(body_text) < 80 or len(body_text) > 1500:
+                    continue
+                if RE_NOISE_HEAD.search(head):
+                    continue
+                qs = heading_to_questions(head)
+                if not qs:
+                    continue
+                entries.append((qs[0], body_text[:1200], label))
+            if max_docs and len(entries) >= max_docs:
+                return entries
     return entries
+
+
+def build_ngrams(text):
+    """Unigram terms only (medical char set is bounded)."""
+    return set(text)
 
 
 def build_index(entries):
@@ -69,6 +106,8 @@ def build_index(entries):
     docs = [(a[:DOC_CHARS], label) for q, a, label in entries]
     inverted = {}
     for di, (q, a, label) in enumerate(entries):
+        q = q or ""
+        a = a or ""
         for ch in set(q + a[:DOC_CHARS]):
             if ch.strip() and not ch.isspace():
                 inverted.setdefault(ch, []).append(di)
@@ -86,12 +125,14 @@ def serialize(docs, inverted, idf, out_dir):
     terms = sorted(inverted.keys())
 
     # ---- index.bin: term table + doclists ----
-    table_bytes = 2 + sum(1 + len(t.encode()) + 4 + 2 for t in terms)
+    # term record: u8 len + utf8 + u32 doclist_offset + u32 doc_count
+    # doclist: u32 doc_id per entry (doc count can exceed 65535)
+    table_bytes = 2 + sum(1 + len(t.encode()) + 4 + 4 for t in terms)
     offsets = {}
     off = table_bytes
     for t in terms:
         offsets[t] = off
-        off += len(inverted[t]) * 2
+        off += len(inverted[t]) * 4
 
     with open(out_dir / "index.bin", "wb") as f:
         f.write(struct.pack("<H", len(terms)))
@@ -100,13 +141,13 @@ def serialize(docs, inverted, idf, out_dir):
             f.write(struct.pack("<B", len(tb)))
             f.write(tb)
             f.write(struct.pack("<I", offsets[t]))
-            f.write(struct.pack("<H", len(inverted[t])))
+            f.write(struct.pack("<I", len(inverted[t])))
         for t in terms:
-            f.write(struct.pack(f"<{len(inverted[t])}H", *inverted[t]))
+            f.write(struct.pack(f"<{len(inverted[t])}I", *inverted[t]))
 
     # ---- docs.bin ----
     with open(out_dir / "docs.bin", "wb") as f:
-        f.write(struct.pack("<H", len(docs)))
+        f.write(struct.pack("<I", len(docs)))
         for doc, label in docs:
             tb = doc.encode("utf-8")
             lb = label.encode("utf-8")[:20]
@@ -141,18 +182,18 @@ def load_index(out_dir):
         for _ in range(n_terms):
             tl = struct.unpack("<B", f.read(1))[0]
             t = f.read(tl).decode("utf-8")
-            off, cnt = struct.unpack("<IH", f.read(6))
+            off, cnt = struct.unpack("<II", f.read(8))
             terms.append((t, off, cnt))
 
     doclists = {}
     with open(out_dir / "index.bin", "rb") as f:
         for t, off, cnt in terms:
             f.seek(off)
-            doclists[t] = struct.unpack(f"<{cnt}H", f.read(cnt * 2))
+            doclists[t] = struct.unpack(f"<{cnt}I", f.read(cnt * 4))
 
     docs = []
     with open(out_dir / "docs.bin", "rb") as f:
-        n_docs = struct.unpack("<H", f.read(2))[0]
+        n_docs = struct.unpack("<I", f.read(4))[0]
         for _ in range(n_docs):
             tl, ll = struct.unpack("<HH", f.read(4))
             t = f.read(tl).decode("utf-8")
