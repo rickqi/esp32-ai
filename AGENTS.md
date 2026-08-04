@@ -76,6 +76,59 @@ arduino-cli compile --fqbn esp32:esp32:esp32s3:UploadSpeed=921600,USBMode=hwcdc,
 ```
 - **注意**:中文 v2/v3 的 FQBN 可能不包含 `UploadMode=default`(见 ino 内注释);英文版 README 的 FQBN 是参考。
 
+### ⚠️ arduino-cli libsdetect 死锁(Windows 已知 bug,2026-08-04 诊断)
+
+**症状**:`arduino-cli compile` 卡在 `Detecting libraries used...` 无限期无进展
+(verbose 日志停在此行,无 cc1 子进程,CPU 不变,~10 分钟后 arduino-cli 静默退出)。
+
+**根因**(已 100% 确认):
+```
+1. libsdetect 阶段对 sketch 用到的库(esp32 core 的 WiFi/Network/Wire)跑预处理器
+2. esp32 core 3.3.11 的库预处理成功但产生海量 stderr (~480KB+)
+3. arduino-cli 1.5.1 在 Windows 的管道缓冲仅 64KB → 子进程写 stderr 阻塞
+4. arduino-cli 等子进程退出, 子进程等管道可写 → 互相死锁
+```
+- 证据:手动预处理器产生 `position 480477` 后挂起;verbose 日志停在 `Detecting libraries used...`
+- **不是** sdkconfig.h 缺失(那是正常失败,不是死锁);**不是**工具链装配问题
+- **arduino-cli 1.5.1 已是最新版**(GitHub API 确认),无修复版本
+
+**规避方案(优先: 手动编译,用 compile_commands.json)**:
+```
+原理: 上次成功编译已生成 <build-path>/compile_commands.json
+      (含每个文件的精确编译命令 + 全部 -I/-D 参数)
+步骤:
+  1. 复用已有 build 目录(勿新建,否则重新 libsdetect 死锁)
+  2. 从 compile_commands.json 提取所有编译命令
+  3. 逐条用 gcc 执行生成 .o(跳过 libsdetect 阶段)
+  4. 手动链接/生成 .bin(或用 arduino-cli 只跑链接阶段)
+```
+- **规则**:任何需要编译固件的后续工作,**默认复用 `D:\esp32-build-zh-v3-test` 缓存目录 + 手动编译**,
+  **禁止**新建 build-path 跑完整 `arduino-cli compile`(必死锁)。
+- 分区表验证用 `gen_esp32part.exe`(core 自带):`gen_esp32part.exe partitions.csv out.bin`,不触发 libsdetect。
+- 备用方案:WSL 部署 arduino-cli(Linux 管道无此 bug,但需下载 ~1.5GB 工具链;2026-08-04 实测 WSL github 下载
+  极慢 ~0.05MB/s,不推荐)。
+- 若必须用 arduino-cli 完整编译:**先杀掉所有残留 arduino-cli/cmd 进程**(多进程竞争会加剧死锁),
+  且只允许**首次构建**(已有 .o 缓存的目录)。
+
+### ✅ 手动编译一键脚本(已验证,2026-08-04)
+```powershell
+# 全流程: ctags 生成 .ino.cpp 原型 → compile_commands.json 编译 .o → 链接 .elf → esptool 生成 .bin
+python tools/manual_compile.py --build-dir D:\esp32-build-zh-v3-test
+# --force 全量重编(库 .o 较慢,约 20+ 分钟);默认增量(秒级,仅编变更 sketch)
+```
+- **核心原理**:arduino 的 .ino 需先合并成 .ino.cpp(顶部 include + 函数原型)。
+  `manual_compile.py` 用 **ctags 提取 33 个函数原型**(与 arduino-builder 同款),按 preamble 顺序注入。
+- **关键步骤**:
+  1. `gen_inocpp`:去 BOM + ctags 原型 + 原型插在首个函数定义前(需在 .ino 的 include/define 之后)
+  2. `compile_objs`:从 compile_commands.json 提取精确编译命令(含 -iprefix/-iwithprefixbefore)
+  3. `link_elf`:platform.txt `recipe.c.combine.pattern` 参数(-L SDK/lib + ld_flags + ld_scripts + 76 .o)
+  4. `make_bin`:esptool elf2image(flash dio/80m/16MB)
+- **验证**:产物 .bin 含 `RAG-SD`/`deep` 字符串;`xtensa-esp32s3-elf-nm` 可见 `rag_deep`/`ragsd_retrieve` 符号。
+- **已知坑**:
+  - .ino 有 UTF-8 BOM,必须先剥离(否则首字符乱码 `'?'`)
+  - 原型必须在 .ino 的 `#define LLM_PROFILE` 等宏之后(否则 llm.h 的 `Scratch::profile` 字段缺失)
+  - ctags 提取用 `--c++-kinds=+pf --fields=+iaS --extra=+q --language-force=c++`
+
 ### 烧录
 ```powershell
 # 固件
