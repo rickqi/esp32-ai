@@ -29,6 +29,16 @@
   seq_len 不同 (128 vs 256) — 固件侧需对应适配 tokenizer/vocab.h, 不能直接复用 V4 固件
 - 🔍 **验证**: model.bin 与 golden 哈希校验 MATCH (源在 MiniMind `models/dpo_h{1,2}_*`)
 
+### 2026-08-04: V5 MiniMind BPE 词表 vocab.h (VOCAB_N=6400)
+- 📖 **词表交付** (commit `6b60c6e`): `firmware/esp32_llm_zh_v3/vocab.h`
+  - 由 [MiniMind](https://github.com/rickqi/minimind) `scripts/gen_vocab_minimind.py` 生成
+  - MiniMind BPE+ByteLevel token id → raw UTF-8 字节 (逆映射还原, 无 U+FFFD 污染)
+  - VOCAB_N 7563 (V4) → **6400** (V5), blob 29.5KB
+  - 已验证: 特殊 token (`<|endoftext|>`/`<|im_start|>`/`<|im_end|>`) 与 BPE token ("你好"/"什么"/"是") 字节正确
+- ⚠️ **范围**: 本次仅交付词表, **未做设备端推理适配** (MiniMind H2 为 Qwen3 风格架构:
+  独立 q/k/v/o 投影 + q_norm/k_norm, 与 esp32-ai llm.h 的融合 qkv 变体不兼容;
+  且固件为字符级 tokenizer, BPE 需 PC 端预分词。如需推理需新增推理核, 另行评估)
+
 ---
 
 ## V4 环境（临床指南整合，独立）
