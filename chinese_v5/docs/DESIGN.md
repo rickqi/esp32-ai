@@ -127,10 +127,19 @@ git 恢复时 PowerShell 重定向 → UTF-16 LE
 
 ```
 分区: model 需扩到 ≥14.5MB (H2 model_llm 14.05MB)
-  → 参考英文版: model 0x170000 size 0xE80000 (14.50MB, 无 kb)
-烧录:
-  esptool write_flash 0x170000 firmware/model_v5/H2/model_llm.bin
-固件: esp32_llm_zh_v5.ino.bin (1385KB)
+  当前 V5 partitions.csv: model 0x8F0000 (8.94MB) — 放不下 H2
+  方案 (英文版布局, 无 kb): model 0x170000 size 0xE80000 = 14.50MB
+    - H2 14.05MB FITS (+0.45MB)
+    - 固件 1385KB FITS (factory 1.375MB)
+    - 无 kb 分区 → RAG 仅 SD 深搜 (rag_sd.h, flash rag.h 不可用)
+
+烧录 (esptool, 需先改 partitions.csv + gen_esp32part 生成 partitions.bin):
+  esptool --chip esp32s3 --port COM3 --baud 921600 write_flash 0x0 bootloader.bin
+  esptool --chip esp32s3 --port COM3 --baud 921600 write_flash 0x10000 esp32_llm_zh_v5.ino.bin
+  esptool --chip esp32s3 --port COM3 --baud 921600 write_flash 0x170000 firmware/model_v5/H2/model_llm.bin
+  esptool --chip esp32s3 --port COM3 --baud 921600 write_flash 0x8000 partitions.bin
+
+注意: COM3 设备当前跑 XiaoZhi 固件, 烧录 V5 将覆盖。
 ```
 
 ## 七、文件清单

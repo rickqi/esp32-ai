@@ -7,6 +7,15 @@
 
 ## V5 环境（外部 MiniMind PLE 模型, model_v5）
 
+### 2026-08-04: V5 烧录准备分析（COM + 产物 + 分区）
+- 🔌 **COM 连接检查**: COM3 (ESP32-S3) 就绪, 可烧录
+- 📦 **产物齐备**: V5 固件 1385KB + H2 model_llm.bin 14.05MB (header 正确 bits=4)
+- ⚠️ **分区阻塞**: 当前 V5 partitions.csv model=8.94MB, H2 14.05MB 放不下
+  - 方案: 英文版布局 model 0x170000 size 0xE80000 = 14.50MB (无 kb 分区)
+  - H2 FITS (+0.45MB), 固件 FITS, RAG 仅 SD 深搜
+- 📝 **烧录命令规划**: write_flash 0x0 bootloader + 0x10000 固件 + 0x170000 模型 + 0x8000 partitions
+- ⚠️ **设备前提**: COM3 当前 XiaoZhi 固件, 烧录 V5 将覆盖
+
 ### 2026-08-04: V5 设计文档 + H1 推理验证
 - 📄 **`chinese_v5/docs/DESIGN.md`**: 完整设计文档
   - 3 处架构差异 (Q tensor bits / q_norm/k_norm / qkv 拼接)
