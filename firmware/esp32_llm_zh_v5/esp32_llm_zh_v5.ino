@@ -16,7 +16,7 @@
 
 #define LLM_PROFILE 1
 #define LLM_PROFILE_NOW() esp_timer_get_time()
-#include "../common/llm.h"
+#include "llm_v5.h"   // V5: fork of llm.h with per-head q_norm/k_norm (MiniMind H1/H2)
 #include "vocab.h"
 #include "rag.h"     // device-side TF-IDF retrieval (flash kb partition)
 #include "rag_sd.h"  // deep-search retrieval over SD-card full KB
@@ -268,7 +268,7 @@ static int read_battery_pct() {
 
 // ---- serial prompt ----------------------------------------------------------
 // Default demo prompt used when PROMPT_TIMEOUT_MS expires.
-static const int DEMO_PROMPT_IDS[] = {66, 1109, 16, 838};   // "感冒发烧" (v3 vocab)
+static const int DEMO_PROMPT_IDS[] = {66, 1109, 16, 838};  // TODO(v5): vocab 6400 re-map needed
 static const int DEMO_N_GENERATE = 200;
 
 // Emit one token to every active output (serial always; TFT when enabled).
