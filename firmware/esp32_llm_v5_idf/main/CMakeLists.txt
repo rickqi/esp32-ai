@@ -1,0 +1,31 @@
+# main component: V5 PLE LLM firmware (ESP-IDF port)
+idf_component_register(
+    SRCS
+        "app_main.c"
+        "core/llm_engine.c"
+        "core/rag_retrieval.c"
+        "boards/board_rlcd.c"
+        "boards/display_bsp.cpp"
+        "boards/keyboard_ble.c"
+    INCLUDE_DIRS
+        "."
+        "core"
+        "boards"
+    REQUIRES
+        esp_partition
+        esp_timer
+        driver
+        fatfs
+        sdmmc
+        mbedtls
+        nvs_flash
+        esp_wifi
+        esp_netif
+        esp_event
+        bt
+        esp_mm
+        heap
+        soc
+        esp_hid
+        esp_lcd
+)
