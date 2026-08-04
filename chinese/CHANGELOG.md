@@ -7,6 +7,15 @@
 
 ## V5 环境（外部 MiniMind PLE 模型, model_v5）
 
+### 2026-08-04: V5 设计文档 + H1 推理验证
+- 📄 **`chinese_v5/docs/DESIGN.md`**: 完整设计文档
+  - 3 处架构差异 (Q tensor bits / q_norm/k_norm / qkv 拼接)
+  - llm_v5.h fork 决策 + convert_h2.py 转换逻辑
+  - 验证结果 + 关键发现 (H2 model.bin 不完整 / V4 vocab 误覆盖 / vocab 编码)
+- ✅ **H1 推理验证**: MiniMind dpo_h1 重导出 6.31MB → 转换 model_llm.bin 6.01MB
+  - verify_h2.c (llm_v5.h): PASS, C top=334 = PyTorch, max diff 1e-5
+  - generate_h2.c: 中文提示 → 中文输出 (重复为小模型固有)
+
 ### 2026-08-04: V5 固件编译完成 + manual_compile.py 参数化
 - 🏗️ **V5 固件编译成功**: esp32_llm_zh_v5.ino include llm_v5.h → bin 1385KB
   (含 rag_sd.h + deep 逻辑, 197 符号含 llm_forward)
