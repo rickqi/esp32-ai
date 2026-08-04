@@ -1,0 +1,8 @@
+# V4 layout: model 8.94MB (8.81MB binary) + kb 5.56MB (flash RAG ~1.97MB)
+# model 扩到 0x8F0000 以容纳 V4 model.bin (8.81MB > 旧 8.56MB)
+# kb 移至 0xA60000 (5.56MB, flash 主索引用; SD 全量索引走 /sdcard/rag/)
+nvs,       data, nvs,     0x9000,    0x5000,
+factory,   app,  factory, 0x10000,   0x160000,
+model,     data, 0x40,    0x170000,  0x8F0000,
+kb,        data, 0x41,    0xA60000,  0x590000,
+coredump,  data, coredump,0xFF0000,  0x10000,
