@@ -7,6 +7,15 @@
 
 ## V5 环境（外部 MiniMind PLE 模型, model_v5）
 
+### 2026-08-04: V5 固件编译完成 + manual_compile.py 参数化
+- 🏗️ **V5 固件编译成功**: esp32_llm_zh_v5.ino include llm_v5.h → bin 1385KB
+  (含 rag_sd.h + deep 逻辑, 197 符号含 llm_forward)
+- ⚙️ **manual_compile.py 参数化**: 加 `--sketch` 参数 (esp32_llm_zh_v3/v5 通用)
+  - gen_inocpp #line 用 ino.name (自动适配 sketch 名)
+  - link_elf/make_bin 输出名用 sketch_name
+- 📚 **firmware/README.md**: 版本矩阵加 v4/v5 行
+- ✅ **验证**: V4 verify PASS + V5 H2 verify PASS (均 max diff 1e-5)
+
 ### 2026-08-04: V5 固件核心实施 — llm_v5.h + H2 转换 + verify PASS
 - 🧬 **llm_v5.h**: fork 共享 llm.h, 加 per-head q_norm/k_norm (MiniMind H2 架构)
   - Model 结构加 `q_norm[32]/k_norm[32]` (head_dim=48)
