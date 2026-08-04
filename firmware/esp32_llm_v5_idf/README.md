@@ -57,11 +57,23 @@ idf.py build                # 增量
 2. **组件名**: IDF v5.5 用 `fatfs` (非 esp_vfs_fat), `esp_mm` (非 esp_heap_caps)
 3. **esp_hidh 类型**: 事件数据是 `esp_hidh_event_data_t` (union), 非 `esp_hidh_event_t` (enum)
 
-## BLE 键盘 (进行中)
+## BLE 键盘 (已移植, 编译通过)
 
-- `keyboard_ble.c`: esp_hidh 初始化 + 事件处理骨架已建
-- 待续: 两段式扫描 (esp_ble_gap_start_scanning + appearance 0x03C1) 
-  → 从 xiaozhi-esp32 bluetooth_keyboard.cc 移植
+`keyboard_ble.c` 完整移植 xiaozhi-esp32 bluetooth_keyboard (C++→C):
+- esp_hidh 初始化 + HID 报告事件回调
+- 两段式 BTSCAN: 第 1 次扫描保存 pending 键盘, 第 2 次连接
+- ConnectAsync 独立任务 (阻塞 esp_hidh_dev_open 不卡主任务)
+- 内存预检 (internal < 15000B 中止) + stale bond 清理 (防泄漏)
+- appearance 0x03C1 过滤键盘
+
+快捷键映射 (接入 board 层): Enter/Esc/Space/↑↓/R/T/M/V/Tab/数字键
+→ 需在 board_rlcd.c 的 key_cb 中实现 (待接)
+
+用法:
+```
+BTSCAN    # 第 1 次: 扫描并记住键盘
+BTSCAN    # 第 2 次: 连接
+```
 
 ## 烧录
 
