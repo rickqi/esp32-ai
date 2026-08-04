@@ -5,6 +5,32 @@
 
 ---
 
+## V5 环境（外部 MiniMind PLE 模型, model_v5）
+
+### 2026-08-04: V5 部署产物 — 外部 PLE 模型接入 (H1/H2)
+- 🧠 **来源**: [MiniMind](https://github.com/rickqi/minimind) 项目的 PLE 模型
+  (Per-Layer Embedding, 对齐 esp32-ai PLE 架构), 完整链路:
+  预训练 → SFT → DPO 偏好优化 → int4 group=32 PTQ → PLE1 扁平二进制导出
+- 📦 **产物结构** (按 model_v4 格式约定, `firmware/model_v5/`):
+  ```
+  model_v5/
+  ├── H1/                      ← MiniMind H1 (d256/l6/p96, 10.79M)
+  │   ├── model.bin    5.8 MB  ← PLE1 (vocab 6400, rope 1e6, group 32)
+  │   ├── golden.npz           ← golden 参考 (固定 prompt logits)
+  │   └── golden.txt
+  └── H2/                      ← MiniMind H2 (d384/l8/p128, 24.95M)
+      ├── model.bin   13.42 MB ← PLE1
+      ├── golden.npz
+      └── golden.txt
+  ```
+- 🏋️ **训练链**: H1 loss 预训练 2.27 → SFT 2.04 → DPO 0.51; H2 预训练 2.07 → SFT 1.77 → DPO 0.52
+- 🎯 **量化**: int4 group=32 PTQ, deg H1 +0.124 / H2 +0.041 (DPO 后量化鲁棒性与 SFT 后一致)
+- ⚠️ **注意**: H1/H2 与 V4 词表不同 (6400 vs 8196)、rope_theta 不同 (1e6 vs 1e4)、
+  seq_len 不同 (128 vs 256) — 固件侧需对应适配 tokenizer/vocab.h, 不能直接复用 V4 固件
+- 🔍 **验证**: model.bin 与 golden 哈希校验 MATCH (源在 MiniMind `models/dpo_h{1,2}_*`)
+
+---
+
 ## V4 环境（临床指南整合，独立）
 
 ### 2026-08-03: V4 中文环境建立 — 临床指南数据整合
