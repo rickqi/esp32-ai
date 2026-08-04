@@ -13,9 +13,13 @@
 | **中文 v1** | `firmware/esp32_llm_zh/` | zh4-ds 12.5M | 中文 | 5,904 字符 | `firmware/model_chinese/model.bin` (6.3MB) | ❌ | ✅ + CJK |
 | **中文 v2** | `firmware/esp32_llm_zh_v2/` | zh5-multi2/raft 13.7M | 中文医学 | 6,594 字符 | `firmware/model_v2/model.bin` (7.5MB) | ✅ | ✅ + CJK |
 | **中文 v3** | `firmware/esp32_llm_zh_v3/` | zh6-raft 15.8M | 中文医学 | 7,563 字符 | `firmware/model_v3/model.bin` (8.92MB) | ✅ | ✅ + CJK |
+| **中文 v4** | `firmware/esp32_llm_zh_v3/` | zh7-raft 16.4M | 中文医学+指南 | **8,196 字符** | `firmware/model_v4/model.bin` (8.81MB) | ✅ deep | ✅ + CJK |
+| **中文 v5** | `firmware/esp32_llm_zh_v5/` | MiniMind H2 24.95M | 外部 PLE | **6,400 BPE** | `firmware/model_v5/H2/model_llm.bin` (14.05MB) | ✅ deep | ✅ + CJK |
 
 > v3 = 蒸馏版本（Qwen3-0.6B 数据蒸馏 + RAFT 证据复述），详见 `chinese_v3/docs/PLAN.md`
 > v3 固件复用 v2 分区表（model 0x170000 8.98MB 放 8.92MB model.bin，kb 0xA00000 2MB），特殊 token 在词表末尾（<user>=N-3, <assistant>=N-2, <end>=N-1）
+> **v4** = 在 v3 目录上新增指南语料（vocab 8196），词表由 `data_v4/tokenizer.json` 生成（`gen_vocab.py`）
+> **v5** = 独立目录，fork `llm_v5.h`（加 per-head q_norm/k_norm）适配外部 MiniMind H2，模型用 `chinese_v5/convert_h2.py` 从 MiniMind PLE1 转换
 
 ---
 

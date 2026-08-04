@@ -72,7 +72,7 @@ def gen_inocpp(ino, out):
             break
     if fn_start is None:
         fn_start = 60
-    merged = '#include <Arduino.h>\n#line 1 "esp32_llm_zh_v3.ino"\n'
+    merged = f'#include <Arduino.h>\n#line 1 "{ino.name}"\n'
     merged += "".join(lines[:fn_start]) + "\n" + "\n".join(protos) + "\n"
     merged += "".join(lines[fn_start:])
     out.write_text(merged, encoding="utf-8")
@@ -110,15 +110,15 @@ def compile_objs(build, force):
     return fail == 0
 
 
-def link_elf(build):
+def link_elf(build, sketch_name):
     gxx = str(T / "bin" / "xtensa-esp32s3-elf-g++.exe")
     objs = sorted(str(o) for o in build.rglob("*.o"))
     ld_flags = (SDK / "flags" / "ld_flags").read_text(encoding="utf-8", errors="replace").split()
     ld_scripts = (SDK / "flags" / "ld_scripts").read_text(encoding="utf-8", errors="replace").split()
     ld_libs = (SDK / "flags" / "ld_libs").read_text(encoding="utf-8", errors="replace").split()
-    elf = build / "esp32_llm_zh_v3.ino.elf"
+    elf = build / f"{sketch_name}.ino.elf"
     cmd = [gxx,
-           f"-Wl,--Map={build/'esp32_llm_zh_v3.ino.map'}",
+           f"-Wl,--Map={build/f'{sketch_name}.ino.map'}",
            f"-L{SDK/'lib'}", f"-L{SDK/'ld'}", f"-L{SDK/'qio_opi'}",
            "-Wl,--wrap=esp_panic_handler", "-Wl,--wrap=esp_bt_mem_release",
            "-Wl,--wrap=esp_bt_controller_mem_release",
@@ -133,10 +133,10 @@ def link_elf(build):
     return r.returncode == 0
 
 
-def make_bin(build):
+def make_bin(build, sketch_name):
     esp = LOCAL / "Arduino15" / "packages" / "esp32" / "tools" / "esptool_py" / "5.3.1" / "esptool.exe"
-    elf = build / "esp32_llm_zh_v3.ino.elf"
-    out = build / "esp32_llm_zh_v3.ino.bin"
+    elf = build / f"{sketch_name}.ino.elf"
+    out = build / f"{sketch_name}.ino.bin"
     r = subprocess.run([str(esp), "--chip", "esp32s3", "elf2image",
                         "--flash-mode", "dio", "--flash-freq", "80m",
                         "--flash-size", "16MB", "-o", str(out), str(elf)])
@@ -150,6 +150,8 @@ def make_bin(build):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--build-dir", required=True)
+    ap.add_argument("--sketch", default="esp32_llm_zh_v3",
+                    help="sketch directory name under firmware/ (default esp32_llm_zh_v3)")
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--no-gen", action="store_true", help="skip .ino.cpp regen")
     args = ap.parse_args()
@@ -157,16 +159,16 @@ def main():
     build = Path(args.build_dir)
     sketch = build / "sketch"
     sketch.mkdir(parents=True, exist_ok=True)
-    ino = Path(r"D:\codes\esp32-ai\firmware\esp32_llm_zh_v3\esp32_llm_zh_v3.ino")
-    inocpp = sketch / "esp32_llm_zh_v3.ino.cpp"
+    ino = Path(rf"D:\codes\esp32-ai\firmware\{args.sketch}\{args.sketch}.ino")
+    inocpp = sketch / f"{args.sketch}.ino.cpp"
 
     if not args.no_gen:
         gen_inocpp(ino, inocpp)
     ok = compile_objs(build, args.force)
     if ok:
-        ok = link_elf(build)
+        ok = link_elf(build, args.sketch)
     if ok:
-        ok = make_bin(build)
+        ok = make_bin(build, args.sketch)
     print("\nBUILD " + ("SUCCESS" if ok else "FAILED"))
     return 0 if ok else 1
 

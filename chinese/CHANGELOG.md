@@ -7,6 +7,21 @@
 
 ## V5 环境（外部 MiniMind PLE 模型, model_v5）
 
+### 2026-08-04: V5 固件核心实施 — llm_v5.h + H2 转换 + verify PASS
+- 🧬 **llm_v5.h**: fork 共享 llm.h, 加 per-head q_norm/k_norm (MiniMind H2 架构)
+  - Model 结构加 `q_norm[32]/k_norm[32]` (head_dim=48)
+  - llm_load 每层读 attn_norm → q_norm → k_norm → qkv → attn_proj
+  - forward: qkv matvec 后 per-head RMSNorm(q/k), 再 RoPE
+- 🔄 **chinese_v5/convert_h2.py**: MiniMind PLE1 → llm_v5.h 格式
+  - q/k/v 三个 [D,D] 拼接 qkv [3D,D]
+  - Q tensor 前插 bits=4 字节 (MiniMind 无 bits 字节)
+  - q_norm/k_norm 权重保留
+- ✅ **verify_h2.c PASS**: C top=42 = PyTorch top=42, max diff 1e-5
+- 🐛 **关键发现**: git 里的 H2 model.bin (13.42MB) 不完整
+  → 用 MiniMind `dpo_h2_384_ple.pth` 重新导出 (14.05MB)
+- 🏗️ **固件编译**: esp32_llm_zh_v5.ino include llm_v5.h → bin 1385KB
+- ⚠️ **V4 修复**: 6b60c6e 误覆盖 vocab.h (8196→6400), 用 data_v4 重新生成恢复
+
 ### 2026-08-04: V5 部署产物 — 外部 PLE 模型接入 (H1/H2)
 - 🧠 **来源**: [MiniMind](https://github.com/rickqi/minimind) 项目的 PLE 模型
   (Per-Layer Embedding, 对齐 esp32-ai PLE 架构), 完整链路:
