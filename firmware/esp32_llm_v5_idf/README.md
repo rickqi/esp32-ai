@@ -59,20 +59,27 @@ idf.py build                # 增量
 
 ## BLE 键盘 (已移植, 编译通过)
 
-`keyboard_ble.c` 完整移植 xiaozhi-esp32 bluetooth_keyboard (C++→C):
+`keyboard_ble.c` 移植 xiaozhi-esp32 bluetooth_keyboard (C++→C), 升级自 breezy_bt (MIT):
 - esp_hidh 初始化 + HID 报告事件回调
 - 两段式 BTSCAN: 第 1 次扫描保存 pending 键盘, 第 2 次连接
-- ConnectAsync 独立任务 (阻塞 esp_hidh_dev_open 不卡主任务)
+- **NVS 持久化**: 键盘地址存 NVS (`bt_kbd/addr`), 重启后 boot timer 自动重连
+- **后台扫描重连**: 断开后自动后台扫描已存键盘 (地址匹配模式)
+- **Protocol Mode 兜底**: 检测键盘缺 Protocol Mode 特征时回退 BLE_GAP_EVENT_NOTIFY_RX (esp_hidh 否则静默丢通知)
+- **双条件过滤**: appearance 0x03C1 **或** HID Service UUID 0x1812
+- **安全配置**: Just Works + Secure Connections + bonding (key dist 双向)
+- **连接参数优化**: 7.5-15ms interval, 1s supervision timeout
+- **REPEAT_PAIRING**: 清旧 bond + 重试
 - 内存预检 (internal < 15000B 中止) + stale bond 清理 (防泄漏)
-- appearance 0x03C1 过滤键盘
+- 按键去重: 仅上报新按下的键 (长按不重复触发)
 
 快捷键映射 (接入 board 层): Enter/Esc/Space/↑↓/R/T/M/V/Tab/数字键
 → 需在 board_rlcd.c 的 key_cb 中实现 (待接)
 
 用法:
 ```
-BTSCAN    # 第 1 次: 扫描并记住键盘
-BTSCAN    # 第 2 次: 连接
+BTSCAN         # 扫描键盘 (有已存键盘则后台重连, 无则 15s 通用扫描)
+BTSCAN         # 第 2 次: 连接 (旧两段式流程, 已兼容)
+BTFORGET       # 清除已存键盘 + NimBLE bonds (新增, 需在 board 层接命令)
 ```
 
 ## 烧录
