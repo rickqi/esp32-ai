@@ -19,6 +19,8 @@
 #include "freertos/task.h"
 #include "driver/uart.h"
 #include "esp_log.h"
+#include "esp_timer.h"
+#include "vocab.h"
 
 #include "board_rlcd.h"
 #include "llm_engine.h"
@@ -41,14 +43,27 @@ static const char *TAG = "board";
 #define LCD_CS   40
 #define LCD_RST  41
 
-// ---- UI layout (400x300) ------------------------------------------------
-#define UI_TEXT_LEFT   4
-#define UI_TEXT_RIGHT  396
-#define UI_HEADER_H    14        // 1 行标题 (14px)
-#define UI_INPUT_H     28        // 2 行输入区 (14px x 2)
-#define UI_INPUT_TOP   (UI_HEADER_H + 4)
-#define UI_OUT_TOP     (UI_INPUT_TOP + UI_INPUT_H)
-#define UI_OUT_BOTTOM  296
+// ---- UI layout (400x300, V3 同款 3-zone TUI) -------------------------------
+#define TUI_LEFT   1
+#define TUI_RIGHT  (399 - UI_BORDER_W)  // 397
+#define TUI_TOP    1
+#define TUI_BOT    (299 - UI_BORDER_W)  // 297
+#define TEXT_LEFT  (TUI_LEFT + UI_BORDER_W + 4)   // 7
+#define TEXT_RIGHT (TUI_RIGHT - UI_BORDER_W - 3)  // 392
+// Zone rows (V3 布局数值, 400x300 相同)
+#define HDR_Y1   3     // header row 1: 2x 标题 (反色)
+#define HDR_Y2   16
+#define HDR2_Y1  17    // header row 2: 1x 信息条 (反色)
+#define HDR2_Y2  26
+#define DIV1_Y   27
+#define INP_Y1   29    // 键盘输入区 (2 行: 预设菜单 / ASCII 输入)
+#define INP_Y2   56
+#define DIV2_Y   57
+#define OUT_Y    59    // 输出区
+#define OUT_BOT  281
+#define DIV3_Y   281
+#define FTR_Y1   282   // footer (反色)
+#define FTR_Y2   293
 
 static char line_buf[LINE_BUF];
 static int line_pos = 0;
@@ -66,34 +81,85 @@ static char g_input_buf[80];      // 自由输入缓冲 (ASCII)
 static int g_input_len = 0;
 static bool g_generating = false;
 
-// ---- 渲染辅助 ------------------------------------------------------------
-static void ui_render_header(void) {
-    // 标题行: 模式 + 提示
-    ui_clear_rect(g_display, 0, 0, 399, UI_HEADER_H - 1);
-    const char *mode = (g_kbd_mode == KBD_MODE_PRESET) ? "PRESET" : "TEXT";
-    char hdr[64];
-    snprintf(hdr, sizeof(hdr), "KB: %s  [Tab]switch  [Esc]clear", mode);
-    ui_text(g_display, UI_TEXT_LEFT, 0, hdr);
+// ---- TUI 渲染 (V3 风格 3-zone) ---------------------------------------------
+// 全屏边框 + 2 条分隔线 (一次绘制后 RLCD_Display, 避免逐元素 flush)
+static void ui_draw_frame(void) {
+    ui_draw_rect(g_display, TUI_LEFT, TUI_TOP, TUI_RIGHT, TUI_BOT);
+    ui_hline(g_display, DIV1_Y, TUI_LEFT + 1, TUI_RIGHT - 1);
+    ui_hline(g_display, DIV2_Y, TUI_LEFT + 1, TUI_RIGHT - 1);
+    ui_hline(g_display, DIV3_Y, TUI_LEFT + 1, TUI_RIGHT - 1);
+    g_display->RLCD_Display();
 }
 
+// 反色双行 header: row1 = 2x 标题, row2 = 键盘信息条 (BT/模式/预设位置)
+static void ui_draw_header(void) {
+    // Row 1: 2x 反色标题居中
+    ui_fill_rect(g_display, TUI_LEFT + 1, HDR_Y1, TUI_RIGHT - 1, HDR_Y2);
+    const char *title = "ESP32-S3 PLE V5";
+    int tw = strlen(title) * UI_CW2;
+    int tx = TEXT_LEFT + (TEXT_RIGHT - TEXT_LEFT - tw) / 2;
+    if (tx < TEXT_LEFT) tx = TEXT_LEFT;
+    ui_text_2x_inv(g_display, tx, HDR_Y1 + 1, title);
+
+    // Row 2: 反色信息条 — 左:BT 状态 | 中:模式 | 右:预设位置/输入长度
+    ui_fill_rect(g_display, TUI_LEFT + 1, HDR2_Y1, TUI_RIGHT - 1, HDR2_Y2);
+    int y = HDR2_Y1 + 1;
+    const char *bt = keyboard_ble_connected() ? "BT:ON " : "BT:OFF";
+    ui_text_inv(g_display, TEXT_LEFT, y, bt);
+    const char *mode = (g_kbd_mode == KBD_MODE_PRESET) ? "PRESET" : "TEXT";
+    int mlen = strlen(mode);
+    int mx = TEXT_LEFT + (TEXT_RIGHT - TEXT_LEFT - mlen * UI_CW) / 2;
+    ui_text_inv(g_display, mx, y, mode);
+    char right[24];
+    if (g_kbd_mode == KBD_MODE_PRESET)
+        snprintf(right, sizeof(right), "[%d/%d]", g_preset_idx + 1, KBD_PRESET_COUNT);
+    else
+        snprintf(right, sizeof(right), "%dch", g_input_len);
+    ui_text_inv(g_display, TEXT_RIGHT - strlen(right) * UI_CW, y, right);
+}
+
+// 反色 footer: 推理统计 t/s | ms | 模型 | token | 秒 (V3 风格, 去掉 RAG)
+static void ui_draw_footer(float tok_s, int ms, int ntok, int secs) {
+    ui_fill_rect(g_display, TUI_LEFT, FTR_Y1, TUI_RIGHT, FTR_Y2);
+    int y = FTR_Y1 + 2;
+    char buf[24];
+    int x = TEXT_LEFT;
+    snprintf(buf, sizeof(buf), "%4.1ft/s", tok_s);
+    ui_text_inv(g_display, x, y, buf);
+    x += 7 * UI_CW + 4;
+    snprintf(buf, sizeof(buf), "%3dms", ms);
+    ui_text_inv(g_display, x, y, buf);
+    x += 5 * UI_CW + 4;
+    snprintf(buf, sizeof(buf), "V%u", (unsigned)VOCAB_N);
+    ui_text_inv(g_display, x, y, buf);
+    x += 6 * UI_CW + 4;
+    snprintf(buf, sizeof(buf), "N%d", ntok);
+    ui_text_inv(g_display, x, y, buf);
+    x += 5 * UI_CW + 4;
+    snprintf(buf, sizeof(buf), "%ds", secs);
+    ui_text_inv(g_display, x, y, buf);
+    g_display->RLCD_Display();
+}
+
+// 渲染输入区 (预设菜单或 ASCII 输入)
 static void ui_render_input(void) {
-    // 输入区: 2 行
-    ui_clear_rect(g_display, 0, UI_INPUT_TOP - 1, 399, UI_INPUT_TOP + UI_INPUT_H - 1);
+    ui_clear_rect(g_display, TEXT_LEFT, INP_Y1, TEXT_RIGHT, INP_Y2);
     if (g_kbd_mode == KBD_MODE_PRESET) {
-        // 显示当前预设 + 位置
         char num[24];
         snprintf(num, sizeof(num), "[%d/%d] ", g_preset_idx + 1, KBD_PRESET_COUNT);
-        ui_text(g_display, UI_TEXT_LEFT, UI_INPUT_TOP, num);
-        ui_text(g_display, UI_TEXT_LEFT + 40, UI_INPUT_TOP, kbd_presets[g_preset_idx].text);
+        ui_text(g_display, TEXT_LEFT, INP_Y1, num);
+        ui_text(g_display, TEXT_LEFT + 40, INP_Y1, kbd_presets[g_preset_idx].text);
+        // 第二行显示提示
+        ui_text(g_display, TEXT_LEFT, INP_Y1 + UI_ROW_H,
+                "Tab:text | Up/Dn:select | Enter:run | Esc:clear");
     } else {
-        // ASCII 输入: 显示输入缓冲
         if (g_input_len > 0) {
             char buf[88];
             memcpy(buf, g_input_buf, g_input_len);
             buf[g_input_len] = 0;
-            ui_text(g_display, UI_TEXT_LEFT, UI_INPUT_TOP, buf);
+            ui_text(g_display, TEXT_LEFT, INP_Y1, buf);
         } else {
-            ui_text(g_display, UI_TEXT_LEFT, UI_INPUT_TOP, "type question... (ASCII)");
+            ui_text(g_display, TEXT_LEFT, INP_Y1, "type question... (ASCII)");
         }
     }
     g_display->RLCD_Display();
@@ -132,21 +198,23 @@ static int hid_keycode_to_ascii(uint8_t keycode, uint8_t modifier) {
 
 static void kbd_run_inference(const int *ids, int len) {
     g_generating = true;
-    // 清空输出区
-    ui_clear_rect(g_display, 0, UI_OUT_TOP, 399, UI_OUT_BOTTOM);
+    // 清空输出区 (保留边框/TUI)
+    ui_clear_rect(g_display, TEXT_LEFT, OUT_Y, TEXT_RIGHT, OUT_BOT);
     g_display->RLCD_Display();
 
-    static char out[1024];   // 静态: 避免 main task 栈溢出 (栈仅 3.5KB)
+    int64_t t0 = esp_timer_get_time();
+    static char out[1024];   // 静态: 避免 main task 栈溢出
     int ob = llm_engine_generate(ids, len, out, sizeof(out), 60);
+    int64_t t1 = esp_timer_get_time();
     out[ob] = 0;
 
-    // 显示生成结果 (输出区, 自动换行: 简单按 20 字/行)
-    int x = UI_TEXT_LEFT, y = UI_OUT_TOP;
+    // 显示生成结果 (输出区, 自动换行)
+    int x = TEXT_LEFT, y = OUT_Y;
     const unsigned char *p = (const unsigned char *)out;
     int col = 0;
     char line[80];
     int lp = 0;
-    while (*p && y + UI_ROW_H <= UI_OUT_BOTTOM) {
+    while (*p && y + UI_ROW_H <= OUT_BOT) {
         if (*p == '\n' || col >= 26) {
             line[lp] = 0;
             ui_text(g_display, x, y, line);
@@ -154,18 +222,22 @@ static void kbd_run_inference(const int *ids, int len) {
             col = 0; lp = 0;
             if (*p == '\n') { p++; continue; }
         }
-        // UTF-8 复制一个字符
         int clen = ((*p & 0xE0) == 0xC0) ? 2 : ((*p & 0xF0) == 0xE0) ? 3 : 1;
         for (int i = 0; i < clen && *p; i++) line[lp++] = *p++;
         col += (clen == 1) ? 1 : 1;
     }
-    if (lp > 0 && y + UI_ROW_H <= UI_OUT_BOTTOM) {
+    if (lp > 0 && y + UI_ROW_H <= OUT_BOT) {
         line[lp] = 0;
         ui_text(g_display, x, y, line);
     }
     g_display->RLCD_Display();
     printf("{\"done\":true,\"tokens\":%d}\n", ob);
     ESP_LOGI(TAG, "generated %d chars", ob);
+    // footer 统计: tok/s = 生成 token / 总耗时 (含 prefill)
+    int secs = (int)((t1 - t0) / 1000000);
+    float tok_s = secs > 0 ? (float)ob / secs : 0.0f;
+    int ms_per_tok = ob > 0 ? (int)((t1 - t0) / 1000 / ob) : 0;
+    ui_draw_footer(tok_s, ms_per_tok, ob, secs);
     g_generating = false;
 }
 
@@ -211,7 +283,7 @@ void board_key_cb(uint8_t keycode, uint8_t modifier) {
     case 0x2B:  // Tab — switch mode
         g_kbd_mode = (g_kbd_mode == KBD_MODE_PRESET) ? KBD_MODE_TEXT : KBD_MODE_PRESET;
         ESP_LOGI(TAG, "mode -> %s", g_kbd_mode == KBD_MODE_PRESET ? "PRESET" : "TEXT");
-        ui_render_header();
+        ui_draw_header();
         ui_render_input();
         break;
     case 0x52:  // Up — prev preset
@@ -313,16 +385,23 @@ static void handle_json_prompt(char *json) {
     p = strstr(json, "\"max\":");
     if (p) { p += 6; while (*p == ' ') p++; int m = atoi(p); if (m > 0 && m <= 128) max = m; }
 
-    // clear display before generation
+    // 清输出区 (保留 TUI 边框/header/footer)
     if (g_display) {
-        g_display->RLCD_ColorClear(ColorWhite);
+        ui_clear_rect(g_display, TEXT_LEFT, OUT_Y, TEXT_RIGHT, OUT_BOT);
         g_display->RLCD_Display();
     }
 
-    static char out[2048];   // 静态: 避免 main task 栈溢出 (栈仅 3.5KB)
+    static char out[2048];   // 静态: 避免 main task 栈溢出
+    int64_t t0 = esp_timer_get_time();
     int ob = llm_engine_generate(ids, n, out, sizeof(out), max);
+    int64_t t1 = esp_timer_get_time();
     printf("{\"done\":true,\"tokens\":%d}\n", ob);
     ESP_LOGI(TAG, "generated %d chars", ob);
+    // footer 统计
+    int secs = (int)((t1 - t0) / 1000000);
+    float tok_s = secs > 0 ? (float)ob / secs : 0.0f;
+    int ms_per_tok = ob > 0 ? (int)((t1 - t0) / 1000 / ob) : 0;
+    ui_draw_footer(tok_s, ms_per_tok, ob, secs);
 }
 
 void board_init(void) {
@@ -348,9 +427,11 @@ void board_init(void) {
     // BLE keyboard
     keyboard_ble_on_key(board_key_cb);
 
-    // 初始 UI: 标题 + 预设菜单
-    ui_render_header();
+    // 初始 UI: TUI 边框 + header + 预设菜单 + footer 占位
+    ui_draw_frame();
+    ui_draw_header();
     ui_render_input();
+    ui_draw_footer(0, 0, 0, 0);
     ESP_LOGI(TAG, "board ready — keyboard UI: [Tab] preset/text, [Up/Dn] nav, [Enter] run");
 }
 

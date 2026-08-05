@@ -260,6 +260,96 @@ static inline void ui_fill_rect(DisplayPort *d, int x0, int y0, int x1, int y1) 
       d->RLCD_SetPixel(x, y, ColorBlack);
 }
 
+// ---- inverted primitives (white on black, for inverted bars) ---------------
+static inline void ui_fill_rect_inv(DisplayPort *d, int x0, int y0, int x1, int y1) {
+  for (int y = y0; y <= y1; y++)
+    for (int x = x0; x <= x1; x++)
+      d->RLCD_SetPixel(x, y, ColorWhite);
+}
+
+static inline void ui_draw_char_inv(DisplayPort *d, int x, int y, unsigned char c) {
+  const uint8_t *g = &UI_FONT_5X7[(unsigned)c * 5];
+  for (int col = 0; col < 5; col++) {
+    uint8_t bits = g[col];
+    for (int row = 0; row < 8; row++)
+      if (bits & (1 << row)) d->RLCD_SetPixel(x + col, y + row, ColorWhite);
+  }
+}
+
+static inline void ui_text_inv(DisplayPort *d, int x, int y, const char *s) {
+  int cx = x;
+  while (*s) {
+    char c = *s++;
+    if (c >= 32 && c < 127) { ui_draw_char_inv(d, cx, y, (unsigned char)c); cx += UI_CW; }
+  }
+}
+
+// ---- 2x font (each pixel → 2×2 block) for prominent text -------------------
+#define UI_CW2 12   // 2x char cell width  (5*2 + 2 gap)
+#define UI_CH2 14   // 2x char cell height (7*2)
+
+static inline void ui_draw_char_2x(DisplayPort *d, int x, int y, unsigned char c) {
+  const uint8_t *g = &UI_FONT_5X7[(unsigned)c * 5];
+  for (int col = 0; col < 5; col++) {
+    uint8_t bits = g[col];
+    for (int row = 0; row < 7; row++) {
+      if (bits & (1 << row)) {
+        d->RLCD_SetPixel(x+col*2,   y+row*2,   ColorBlack);
+        d->RLCD_SetPixel(x+col*2+1, y+row*2,   ColorBlack);
+        d->RLCD_SetPixel(x+col*2,   y+row*2+1, ColorBlack);
+        d->RLCD_SetPixel(x+col*2+1, y+row*2+1, ColorBlack);
+      }
+    }
+  }
+}
+
+static inline void ui_draw_char_2x_inv(DisplayPort *d, int x, int y, unsigned char c) {
+  const uint8_t *g = &UI_FONT_5X7[(unsigned)c * 5];
+  for (int col = 0; col < 5; col++) {
+    uint8_t bits = g[col];
+    for (int row = 0; row < 7; row++) {
+      if (bits & (1 << row)) {
+        d->RLCD_SetPixel(x+col*2,   y+row*2,   ColorWhite);
+        d->RLCD_SetPixel(x+col*2+1, y+row*2,   ColorWhite);
+        d->RLCD_SetPixel(x+col*2,   y+row*2+1, ColorWhite);
+        d->RLCD_SetPixel(x+col*2+1, y+row*2+1, ColorWhite);
+      }
+    }
+  }
+}
+
+static inline void ui_text_2x(DisplayPort *d, int x, int y, const char *s) {
+  int cx = x;
+  while (*s) {
+    char c = *s++;
+    if (c >= 32 && c < 127) { ui_draw_char_2x(d, cx, y, (unsigned char)c); cx += UI_CW2; }
+  }
+}
+
+static inline void ui_text_2x_inv(DisplayPort *d, int x, int y, const char *s) {
+  int cx = x;
+  while (*s) {
+    char c = *s++;
+    if (c >= 32 && c < 127) { ui_draw_char_2x_inv(d, cx, y, (unsigned char)c); cx += UI_CW2; }
+  }
+}
+
+// ---- BORDER_W-pixel thick rectangle frame ----------------------------------
+#define UI_BORDER_W 2
+
+static inline void ui_draw_rect(DisplayPort *d, int x0, int y0, int x1, int y1) {
+  for (int w = 0; w < UI_BORDER_W; w++) {
+    int L = x0 + w, R = x1 - w, T = y0 + w, B = y1 - w;
+    for (int x = L; x <= R; x++) { d->RLCD_SetPixel(x, T, ColorBlack); d->RLCD_SetPixel(x, B, ColorBlack); }
+    for (int y = T; y <= B; y++) { d->RLCD_SetPixel(L, y, ColorBlack); d->RLCD_SetPixel(R, y, ColorBlack); }
+  }
+}
+
+// ---- horizontal separator line ----------------------------------------------
+static inline void ui_hline(DisplayPort *d, int y, int x0, int x1) {
+  for (int x = x0; x <= x1; x++) d->RLCD_SetPixel(x, y, ColorBlack);
+}
+
 #ifdef __cplusplus
 }
 #endif
