@@ -8,9 +8,15 @@ CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y
 
+# CPU: 240MHz (IDF 默认 160MHz — 推理性能关键 1.5x)
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
 # App (factory partition)
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions/partitions.csv"
+
+# Main task stack: llm_engine_generate uses out[2048] + hist[256] (~3.5KB+)
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 
 # PSRAM for LLM KV cache + scratch (esp32-ai model)
 CONFIG_SPIRAM_USE_MALLOC=y
@@ -32,6 +38,10 @@ CONFIG_ESP_CONSOLE_UART_DEFAULT=y
 
 # Reduce log noise
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# LLM inference is CPU-bound in main task (flash mmap + PSRAM, no yield per token)
+# — disable task WDT to avoid false IDLE0 starvation panics
+CONFIG_ESP_TASK_WDT_EN=n
 
 # Optimization: -Os (matches xiaozhi; -Og ICEs xtensa gcc 14.2.0 on esp_lcd)
 CONFIG_COMPILER_OPTIMIZATION_SIZE=y

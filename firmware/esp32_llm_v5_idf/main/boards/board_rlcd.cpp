@@ -27,11 +27,11 @@
 #include "ui_render.h"
 #include "presets.h"
 #include "prompt_encoder.h"
+#include "driver/usb_serial_jtag.h"
+#include "mbedtls/base64.h"
 
 static const char *TAG = "board";
 
-#define UART_PORT UART_NUM_0
-#define UART_BUF_SIZE 1024
 #define LINE_BUF 1024
 
 // RLCD-4.2 SPI: mosi=12, scl=11, dc=5, cs=40, rst=41 (matches Arduino v5)
@@ -136,7 +136,7 @@ static void kbd_run_inference(const int *ids, int len) {
     ui_clear_rect(g_display, 0, UI_OUT_TOP, 399, UI_OUT_BOTTOM);
     g_display->RLCD_Display();
 
-    char out[1024];
+    static char out[1024];   // 静态: 避免 main task 栈溢出 (栈仅 3.5KB)
     int ob = llm_engine_generate(ids, len, out, sizeof(out), 60);
     out[ob] = 0;
 
@@ -246,8 +246,59 @@ void board_key_cb(uint8_t keycode, uint8_t modifier) {
     }
 }
 
+// ---- serial screenshot (PBM P4 -> base64) — 与 Arduino v5 协议一致 ---------
+//   PC -> MCU: "SHOOT\n"
+//   MCU -> PC: "SCREENSHOT_START\n" <base64 PBM 72-char 行> "SCREENSHOT_END\n"
+static void take_screenshot(void) {
+  if (!g_display) return;
+  int w = g_display->GetWidth();
+  int h = g_display->GetHeight();
+  int row_bytes = (w + 7) / 8;                    // 50 for 400px
+  char hdr[24];
+  int hdr_len = snprintf(hdr, sizeof(hdr), "P4\n%d %d\n", w, h);
+  int pbm_size = hdr_len + row_bytes * h;         // 13 + 15000 = 15013
+
+  uint8_t *pbm = (uint8_t *)malloc(pbm_size);
+  if (!pbm) { printf("SCREENSHOT_ERROR: out of memory\n"); return; }
+  memcpy(pbm, hdr, hdr_len);
+
+  uint8_t *pdata = pbm + hdr_len;
+  for (int y = 0; y < h; y++) {
+    for (int bx = 0; bx < row_bytes; bx++) {
+      uint8_t byte = 0;
+      for (int b = 0; b < 8; b++) {
+        int x = bx * 8 + b;
+        if (x >= w) break;
+        if (g_display->GetPixel(x, y) == ColorBlack) byte |= (0x80 >> b);
+      }
+      *pdata++ = byte;
+    }
+  }
+
+  size_t b64_len = 0;
+  mbedtls_base64_encode(NULL, 0, &b64_len, pbm, pbm_size);
+  uint8_t *b64 = (uint8_t *)malloc(b64_len + 1);
+  if (!b64) { free(pbm); printf("SCREENSHOT_ERROR: base64 alloc\n"); return; }
+  mbedtls_base64_encode(b64, b64_len, &b64_len, pbm, pbm_size);
+  b64[b64_len] = '\0';
+
+  printf("SCREENSHOT_START\n");
+  const int chunk = 72;
+  for (size_t i = 0; i < b64_len; i += chunk) {
+    int remain = (int)b64_len - (int)i;
+    int len = (remain < chunk) ? remain : chunk;
+    // USB-Serial-JTAG 直接输出 (printf 会缓冲, 此处逐块写)
+    for (int k = 0; k < len; k++) usb_serial_jtag_write_bytes(&b64[i + k], 1, pdMS_TO_TICKS(100));
+  }
+  usb_serial_jtag_write_bytes((const uint8_t *)"\n", 1, pdMS_TO_TICKS(100));
+  printf("SCREENSHOT_END\n");
+  free(b64);
+  free(pbm);
+}
+
 // ---- UART JSON prompt (保留 COM 输入兼容) --------------------------------
 static void handle_json_prompt(char *json) {
+    ESP_LOGI(TAG, "HJP-ENTER buf=[%.60s]", json);
     const char *p = strstr(json, "\"ids\":[");
     if (!p) return;
     p += 7;
@@ -268,7 +319,7 @@ static void handle_json_prompt(char *json) {
         g_display->RLCD_Display();
     }
 
-    char out[2048];
+    static char out[2048];   // 静态: 避免 main task 栈溢出 (栈仅 3.5KB)
     int ob = llm_engine_generate(ids, n, out, sizeof(out), max);
     printf("{\"done\":true,\"tokens\":%d}\n", ob);
     ESP_LOGI(TAG, "generated %d chars", ob);
@@ -276,7 +327,12 @@ static void handle_json_prompt(char *json) {
 
 void board_init(void) {
     ESP_LOGI(TAG, "board init (RLCD-4.2)");
-    uart_driver_install(UART_PORT, UART_BUF_SIZE * 2, 0, 0, NULL, 0);
+
+    // COM 口实际是 Espressif USB-Serial-JTAG (VID_303A PID_1001), 非 UART0 桥.
+    // RX 必须从 usb_serial_jtag 读 (uart_read_bytes(UART_NUM_0) 收不到 USB 数据).
+    usb_serial_jtag_driver_config_t usj_cfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
+    esp_err_t usj_rc = usb_serial_jtag_driver_install(&usj_cfg);
+    ESP_LOGI(TAG, "usb_serial_jtag_driver_install rc=%d (%s)", usj_rc, esp_err_to_name(usj_rc));
 
     // LCD display (ST7305 reflective panel, 400x300)
     g_display = new DisplayPort(LCD_MOSI, LCD_SCL, LCD_DC, LCD_CS, LCD_RST, 400, 300);
@@ -299,9 +355,12 @@ void board_init(void) {
 }
 
 void board_loop(void) {
+    // RX 走 USB-Serial-JTAG (COM 口是原生 USB 枚举, 非 UART0 GPIO44)
+    int loop_count = 0;
     while (1) {
+        if ((++loop_count % 5000) == 0) ESP_LOGI(TAG, "loop heartbeat %d", loop_count);
         uint8_t c;
-        int r = uart_read_bytes(UART_PORT, &c, 1, pdMS_TO_TICKS(10));
+        int r = usb_serial_jtag_read_bytes(&c, 1, pdMS_TO_TICKS(10));
         if (r == 1) {
             if (c == '\n') {
                 line_buf[line_pos] = 0;
@@ -310,6 +369,8 @@ void board_loop(void) {
                     handle_json_prompt(line_buf);
                 } else if (strcmp(line_buf, "BTSCAN") == 0) {
                     keyboard_ble_scan();
+                } else if (strcmp(line_buf, "SHOOT") == 0) {
+                    take_screenshot();
                 }
             } else if (c != '\r' && line_pos < LINE_BUF - 1) {
                 line_buf[line_pos++] = (char)c;

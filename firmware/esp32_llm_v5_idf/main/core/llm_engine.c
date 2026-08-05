@@ -24,6 +24,61 @@ static Scratch g_scratch;
 static bool g_ready = false;
 static const uint8_t *g_model_base = NULL;
 
+// ---- int8 output head staging (Arduino esp32_llm_zh_v5 同款优化) ----------
+// tok_emb 头 [V,D] 每 token 全量 matvec, 从 flash mmap 读 14MB/次 (dio 80MHz
+// ~40MB/s → 72 tokens ≈ 25-50s, 50x 慢于 host). 启动时把 int4 nibbles 解包为
+// int8 存 PSRAM (一次), 每 token 只做 int8×int8 点积, 不再读 flash.
+static int8_t *s_head_w8 = NULL;       // [rows*cols] 解包 int8 权重 (-7..7)
+static float  *s_head_scale = NULL;    // [rows] 每行 dequant scale (n_groups==1)
+static int s_head_rows = 0, s_head_cols = 0;
+static int8_t s_head_actq[512];        // 量化激活 (D=384, 最大输入维)
+static float  s_head_acts;
+
+// int8 dot -> int32 (S3 SIMD 友好)
+static inline int32_t head_dot_i8(const int8_t *a, const int8_t *b, int n) {
+  int32_t acc = 0;
+  for (int i = 0; i < n; i++) acc += (int32_t)a[i] * (int32_t)b[i];
+  return acc;
+}
+
+// head_matvec 覆盖: 用 staged int8 权重, 每 token 只读 PSRAM
+static void head_matvec_int8(const QT *t, const float *x, float *y) {
+  (void)t;
+  quantize_act(x, s_head_cols, s_head_actq, &s_head_acts);
+  for (int r = 0; r < s_head_rows; r++)
+    y[r] = (float)head_dot_i8(s_head_actq, s_head_w8 + (size_t)r * s_head_cols,
+                              s_head_cols) * s_head_scale[r] * s_head_acts;
+}
+
+// 启动时把 tok_emb 头解包到 PSRAM (int4 nibbles -> int8, 一次)
+static int stage_head_int8(QT *t) {
+  s_head_rows = t->rows;
+  s_head_cols = t->cols;
+  if (s_head_cols > (int)sizeof(s_head_actq)) {
+    ESP_LOGE(TAG, "head cols %d > actq %d", s_head_cols, (int)sizeof(s_head_actq));
+    return -1;
+  }
+  s_head_w8 = heap_caps_malloc((size_t)s_head_rows * s_head_cols, MALLOC_CAP_SPIRAM);
+  s_head_scale = heap_caps_malloc((size_t)s_head_rows * sizeof(float), MALLOC_CAP_SPIRAM);
+  if (!s_head_w8 || !s_head_scale) {
+    ESP_LOGE(TAG, "head staging alloc failed"); return -2;
+  }
+  for (int r = 0; r < s_head_rows; r++) {
+    const uint8_t *row = t->codes + (size_t)r * t->row_bytes;
+    int8_t *dst = s_head_w8 + (size_t)r * s_head_cols;
+    for (int j = 0; j < s_head_cols; j++) {
+      uint8_t byte = row[j >> 1];
+      int code = (j & 1) ? (byte >> 4) : (byte & 0xF);
+      dst[j] = (int8_t)(code - 8);
+    }
+    s_head_scale[r] = half2float(t->scales[(size_t)r * t->n_groups]);  // n_groups==1
+  }
+  ESP_LOGI(TAG, "head staged int8: %.2f MB (%d x %d)",
+           ((size_t)s_head_rows * s_head_cols + (size_t)s_head_rows * 4) / 1e6,
+           s_head_rows, s_head_cols);
+  return 0;
+}
+
 float g_sampling_temp = 0.8f;
 int   g_sampling_topk = 40;
 float g_repetition_penalty = 1.3f;
@@ -99,6 +154,12 @@ int llm_engine_load(void) {
     }
     g_model_base = (const uint8_t *)base;
 
+    // 输出头 int8 staging: 每 token 不再从 flash 读 14MB (性能关键)
+    if (stage_head_int8(&g_model.tok_emb) == 0)
+        g_model.head_matvec = head_matvec_int8;
+    else
+        ESP_LOGW(TAG, "head staging failed — 用 flash mmap matvec (慢)");
+
     // allocate scratch in PSRAM
     int D = g_model.c.dim, L = g_model.c.n_layers, P = g_model.c.ple_dim;
     int F = g_model.c.ffn, V = g_model.c.vocab, S = g_model.c.seq_len;
@@ -135,7 +196,8 @@ int llm_engine_generate(const int *prompt_ids, int prompt_len,
     int D = g_model.c.dim, L = g_model.c.n_layers, P = g_model.c.ple_dim;
     int F = g_model.c.ffn, V = g_model.c.vocab, S = g_model.c.seq_len;
 
-    int hist[256], hist_n = 0;
+    static int hist[256];   // 静态: 避免 main task 栈溢出 (栈仅 3.5KB)
+    int hist_n = 0;
     for (int i = 0; i < prompt_len && i < S; i++) {
         llm_forward(&g_model, prompt_ids[i], i, &g_scratch);
         if (hist_n < 256) hist[hist_n++] = prompt_ids[i];

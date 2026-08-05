@@ -29,4 +29,12 @@ idf_component_register(
         soc
         esp_hid
         esp_lcd
+        esp_driver_usb_serial_jtag
+)
+
+# LLM 推理热路径 (matvec/dequant): 单独 -O2, 避免 -Os 低效内循环.
+# (全局 -Os 因 -Og ICE 于 esp_lcd; 仅本文件用 O2 不影响其它代码)
+target_compile_options(__idf_main PRIVATE
+    "$<$<COMPILE_LANGUAGE:C>:-O2>"
+    "$<$<COMPILE_LANGUAGE:CXX>:-O2>"
 )

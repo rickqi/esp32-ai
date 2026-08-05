@@ -1,10 +1,9 @@
-@echo off
-REM ============================================================
-REM V5 IDF H2 烧录脚本 (Windows PowerShell)
-REM 分区: bootloader 0x0 | partition 0x8000 | firmware 0x10000 | model 0x170000
-REM 前置: COM 口设备, IDF build 产物已存在
-REM 用法: powershell -ExecutionPolicy Bypass -File flash_v5.ps1 [-Port COM4]
-REM ============================================================
+# ============================================================
+# V5 IDF H2 烧录脚本 (Windows PowerShell)
+# 分区: bootloader 0x0 | partition 0x8000 | firmware 0x10000 | model 0x170000
+# 前置: COM 口设备, IDF build 产物已存在
+# 用法: powershell -ExecutionPolicy Bypass -File flash_v5.ps1 [-Port COM4]
+# ============================================================
 param([string]$Port = "COM3")
 
 $ESP  = "C:\Users\szk220009\.local\bin\esptool.exe"
