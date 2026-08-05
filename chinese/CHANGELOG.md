@@ -81,6 +81,21 @@
   独立 q/k/v/o 投影 + q_norm/k_norm, 与 esp32-ai llm.h 的融合 qkv 变体不兼容;
   且固件为字符级 tokenizer, BPE 需 PC 端预分词。如需推理需新增推理核, 另行评估)
 
+### 2026-08-05: V5 推理链路完成 + RAG 固件链路
+- ✅ **H1/H2 RAFT 模型部署**: model_llm.bin (H1 6.01MB / H2 14.05MB), 主机 verify **PASS** (diff < 0.00001)
+  - 转换: convert_h2.py (MiniMind PLE1 → llm_v5.h 格式, GQA→MHA, q_norm/k_norm 支持)
+- 🔧 **固件 ChatML 特殊 token 修复** (esp32_llm_zh_v5.ino):
+  - 生成循环: 屏蔽 `<|im_start|>`(1), 停止 `<|endoftext|>`(0)/`<|im_end|>`(2)
+  - 显示过滤: ChatML 标记 (1/2/0) 而非 N-3/N-2/N-1
+  - `MM_MINIMIND` 宏: 禁用设备端 char-level RAG (BPE 不兼容, 证据 PC 端注入)
+- 🖥️ **PC 端 RAG 发送器** (tools/send_prompt_rag.py):
+  - jieba IDF 检索 format_data.jsonl (11K 医学QA) → Top-2 证据 → ChatML 注入 (≤100 tokens 适配 seq_len=128)
+  - 串口 `{"ids":[...],"max":N}` 发送 + 生成文本接收
+- 📊 **H1/H2 RAG vs 无 RAG 对比** (WSL GPU, 5 医学问题):
+  - **无 RAG**: H1/H2 均答错 (编造/循环) — 小模型无外部知识必然失败
+  - **有 RAG**: H1/H2 均准确复述证据 (肺癌症状 / 收缩压≥140/90mmHg)
+  - 结论: RAG+RAFT 是 H1/H2 医学问答的正确路径, 双模型复述能力达标
+
 ---
 
 ## V4 环境（临床指南整合，独立）
