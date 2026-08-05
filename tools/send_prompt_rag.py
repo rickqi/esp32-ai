@@ -88,24 +88,38 @@ def retrieve(query, inv, idf, k=2):
 # ---------------------------------------------------------------------------
 def build_chatml_ids(tok, question, evidence, max_prompt=100):
     """构建 ChatML ids: system(带证据) + user(问题) + assistant 引导.
-    约束: 总长度 <= max_prompt (seq_len=128, 留空间给生成)."""
+    约束: 总长度 <= max_prompt (seq_len=128, 留空间给生成).
+    截断策略: 证据优先被截断(保留整句前缀), 问题与 assistant 引导始终完整保留.
+    修复(2026-08-05): 旧逻辑 ids[:keep]+ids[-4:] 会静默丢弃问题部分."""
     im_start, im_end = 1, 2
 
     def enc(text):
         return tok.encode(text, add_special_tokens=False).ids
 
-    ids = [im_start] + enc("system\n你是一个医学助手，请根据提供的参考资料准确回答问题。") + [im_end]
-    ids += enc("\n")
-    ids += [im_start] + enc("user\n")
-    if evidence:
-        ids += enc("参考资料：\n" + evidence + "\n\n")
-    ids += enc("问题：" + question) + [im_end] + enc("\n")
-    ids += [im_start] + enc("assistant\n")
+    # 固定结构 (不含证据): system 头 + user 标记
+    head = [im_start] + enc("system\n你是一个医学助手，请根据提供的参考资料准确回答问题。") + [im_end]
+    head += enc("\n")
+    head += [im_start] + enc("user\n")
+    # 问题 + assistant 引导 (必须完整)
+    q_part = enc("问题：" + question) + [im_end] + enc("\n")
+    tail = [im_start] + enc("assistant\n")
 
-    # 超长截断 (保留 assistant 引导)
-    if len(ids) > max_prompt:
-        keep = max_prompt - 4
-        ids = ids[:keep] + ids[-4:]
+    ids = head + q_part + tail
+    if evidence:
+        ev_prefix = enc("参考资料：\n")
+        sep = enc("\n\n")  # 证据与问题之间的分隔
+        # 预算 = max_prompt - 固定结构 - 证据标记 - 分隔符; 若预算不足则放弃证据保问题
+        budget = max_prompt - len(head) - len(q_part) - len(tail) - len(ev_prefix) - len(sep)
+        if budget > 0:
+            ev_ids = enc(evidence)
+            # 截断到 UTF-8 边界 (避免多字节字符被拦腰切断)
+            while budget > 0 and budget < len(ev_ids):
+                cut = tok.decode(ev_ids[:budget], skip_special_tokens=False)
+                if "\ufffd" not in cut:
+                    break
+                budget -= 1
+            ev_trunc = ev_ids[:budget]
+            ids = head + ev_prefix + ev_trunc + sep + q_part + tail
     return ids
 
 
