@@ -7,6 +7,40 @@
 
 ## V5 环境（外部 MiniMind PLE 模型, model_v5）
 
+### 2026-08-05: 键盘输入提示词 UI + BLE 键盘升级 + RAG 验证收尾
+- ⌨️ **键盘输入提示词 UI** (替代 COM 注入, Oracle 验证架构):
+  - **预设模式 (主)**: `tools/gen_presets.py` PC 端真实 HF BPE 预烘焙 22 个
+    中文医学问题 → `presets.h` (37-45 tok/个, 含完整 ChatML)
+    ↑/↓ 切换菜单 RLCD 实时显示, Enter 直接推理 (零运行时编码)
+  - **自由输入 (次)**: 字母数字键 ASCII 输入 + Backspace, Enter 推理
+    (物理键盘无法打中文 + 模型纯中文训练 → ASCII 仅作演示链路)
+  - **prompt_encoder.c**: 设备端最长匹配 + 字节回退编码
+    (vocab 256 单字节全覆盖已验证 → 任意 UTF-8 无损编码)
+    ChatML 包装与 send_prompt_rag.py 字节级一致 (max_prompt=100 截断)
+  - **ui_render.h**: 5x7 ASCII 字体 + 14x14 CJK (7854 字形) 移植 Arduino
+    display.h (DisplayPort 已有 PSRAM 1bpp framebuffer + LUT, 零 SPI 改动)
+  - board_rlcd.cpp: 键盘状态机 (PRESET/TEXT), 输入区/输出区分区显示
+  - COM JSON prompt 兼容保留; 固件 .bin 939KB; host 编码器测试全 PASS
+- 🎹 **BLE 键盘升级** (移植 valdanylchuk/breezy_bt MIT):
+  - NVS 持久化键盘地址 + 重启 boot timer 自动重连
+  - 断开后后台扫描已存键盘 (地址匹配模式)
+  - Protocol Mode 缺失回退 BLE_GAP_EVENT_NOTIFY_RX (esp_hidh 静默丢通知兜底)
+  - 双条件过滤 (appearance 0x03C1 OR UUID 0x1812) + SC/bonding 安全配置
+  - 连接参数 7.5-15ms + REPEAT_PAIRING 清旧 bond + 按键去重
+  - 新增 keyboard_ble_clear_bonds() API; 固件 .bin 595KB
+- 🔧 **send_prompt_rag.py 截断 bug 修复**: `ids[:keep]+ids[-4:]` 静默丢弃
+  问题部分 (5/5 实测 Q保留=False) → 证据按预算截断前缀, 问题/assistant
+  完整保留 + UTF-8 边界保护; 修复后 ALL PASS
+- 🔍 **H1/H2 RAG vs 无 RAG 验证** (RAFT 权重):
+  - 效果: 无 RAG 覆盖 0% (H1 "Agggggg" 循环/H2 幻觉), RAG 92-100% 逐字复述
+  - 速度 (C 端 llm_v5.h): H1 ~250 tok/s, H2 ~91 tok/s (RAG 影响 <2.5%)
+  - 索引洞察: 3 个索引中仅 jieba (Index A) 在 V5 链路活跃, SD 137K
+    (Index B) 被 MM_MINIMIND 禁用为死代码 → 验证链以 PC 端 jieba 为准
+  - 验证记录: `docs/V5_RAG_verification_20260805.md`
+- 🔥 **flash_v5.ps1 修复**: 旧脚本指向 Arduino v3 过期产物 → 重写指向 IDF
+  build 正确产物 (bootloader 0x0 / partition 0x8000 / firmware 0x10000 /
+  model H2 0x170000) + 4 文件前置校验 + -Port 参数
+
 ### 2026-08-04: V5 烧录准备分析（COM + 产物 + 分区）
 - 🔌 **COM 连接检查**: COM3 (ESP32-S3) 就绪, 可烧录
 - 📦 **产物齐备**: V5 固件 1385KB + H2 model_llm.bin 14.05MB (header 正确 bits=4)
