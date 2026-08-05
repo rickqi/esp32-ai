@@ -4,6 +4,7 @@ idf_component_register(
         "app_main.c"
         "core/llm_engine.c"
         "core/rag_retrieval.c"
+        "core/prompt_encoder.c"
         "boards/board_rlcd.cpp"
         "boards/display_bsp.cpp"
         "boards/keyboard_ble.c"
