@@ -21,6 +21,12 @@
 #include "rag.h"     // device-side TF-IDF retrieval (flash kb partition)
 #include "rag_sd.h"  // deep-search retrieval over SD-card full KB
 
+// ---- MiniMind H1/H2 mode (V5) ---------------------------------------------
+// MiniMind models use BPE ChatML (<|im_start|>=1, <|im_end|>=2, <|endoftext|>=0).
+// Device-side char-level RAG (rag.h/rag_sd.h) is BPE-incompatible; evidence
+// injection is done PC-side. Enable for H1/H2; comment for legacy char models.
+#define MM_MINIMIND
+
 // ---- SD card logging (Waveshare RLCD-4.2: SDMMC, CLK=38 CMD=21 D0=39) ------
 // Writes every generation (prompt + output) as UTF-8 to /sdcard/logs/llm.log,
 // so Chinese output is readable from the SD card even when the serial terminal
@@ -624,7 +630,12 @@ static int rag_augment_prompt() {
 // Run the full generate loop using the last received prompt (recv_ids/recv_n).
 // Writes tokens to serial (raw text) and display, then emits a JSON done signal.
 static void run_generation() {
+#ifndef MM_MINIMIND
+  // Device-side RAG is char-level (v1-v4 vocab) and BPE-incompatible with
+  // MiniMind H1/H2. Evidence injection happens PC-side (MiniMind tokenizer).
+  // Keep the call for legacy char-level models; skip for MiniMind.
   rag_augment_prompt();  // device-side RAG: prepend KB evidence to prompt
+#endif
   sd_log_open("generation");   // open UTF-8 log on SD (prompt+output via emit)
 #if USE_DISPLAY
   display_home();
@@ -647,10 +658,14 @@ static void run_generation() {
   for (int i = 0; i < recv_n && plen < (int)sizeof(prompt_buf) - 1; i++) {
     int t = recv_ids[i];
     if (t < 0 || t >= VOCAB_N) continue;
+#ifdef MM_MINIMIND
+    if (t == 1 || t == 2 || t == 0) continue;   // <|im_start|>/<|im_end|>/<|endoftext|>
+#else
     if (t == 2) continue;                                       // <BOS>
     if (t == VOCAB_N - 3) continue;                              // <user>
     if (t == VOCAB_N - 2) continue;                              // <assistant>
     if (t == VOCAB_N - 1) continue;                              // <end>
+#endif
     int tlen = VOCAB_OFF[t + 1] - VOCAB_OFF[t];
     for (int j = 0; j < tlen && plen < (int)sizeof(prompt_buf) - 1; j++)
       prompt_buf[plen++] = (char)VOCAB_BLOB[VOCAB_OFF[t] + j];
@@ -685,18 +700,15 @@ static void run_generation() {
   int hist_n = 0;
 
   for (int step = 0; step < recv_max && pos < model.c.seq_len; step++) {
-    // Block SFT structural tokens for small (Chinese) models so they don't
-    // appear mid-generation (only EOS/<end> may terminate).
-    // Token ids are vocab-dependent: v1 vocab (5904) has <user>/<assistant>/<end>
-    // markers always at the END of vocab (N-3/N-2/N-1).
-    // <BOS> (2) is also blocked: the model must never re-emit the start marker.
-    s.logits[2] = -1e30f;                              // <BOS>
-    s.logits[VOCAB_N - 3] = -1e30f; s.logits[VOCAB_N - 2] = -1e30f;
+    // MiniMind ChatML (V5): <|im_start|>=1 must not re-emit mid-generation;
+    // <|im_end|>=2 and <|endoftext|>=0 are the stop tokens.
+    // (char-level v1-v4 used N-3/N-2/N-1 markers and id 2 as BOS — not valid here)
+    s.logits[1] = -1e30f;                              // <|im_start|> block
     // temperature + top-k sampling with repetition penalty
     tok = sample_token(s.logits, VOCAB_N, SAMPLING_TEMP, SAMPLING_TOPK, &rng_state,
                        hist, hist_n);
-    // Stop on end markers: 0=English EOT, 3=Chinese EOS, <end>=VOCAB_N-1
-    if (tok == 0 || tok == 3 || tok == VOCAB_N - 1) break;
+    // Stop on ChatML end markers: 0=<|endoftext|>, 2=<|im_end|>
+    if (tok == 0 || tok == 2) break;
     // record token in history ring buffer
     if (hist_n < HIST_WINDOW) hist[hist_n++] = tok;
     else { for (int h = 0; h < HIST_WINDOW - 1; h++) hist[h] = hist[h + 1]; hist[HIST_WINDOW - 1] = tok; }
