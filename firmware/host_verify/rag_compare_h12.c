@@ -170,22 +170,29 @@ int main(int argc, char **argv) {
   int obA = generate(&m, &s, prompt_ids, plen, outA, sizeof(outA), max_new);
   printf("=== [无 RAG] baseline ===\n%s\n\n", outA);
 
-  // B. 有 RAG (prepend evidence text)
-  // evidence: simple medical QA evidence in Chinese (from SD KB concept)
+  // B. 有 RAG (system 引导 + 参考材料格式, 同 minimind chat template)
+  // 参考材料: 真实肺癌证据 (与问题相关)
   const char *evidence =
-    "感冒发烧后体温升高，建议多饮水注意休息，若持续高烧需就医。发热是身体的防御反应，体温超过38.5度可考虑退烧药。";
-  int ev_ids[128];
-  int evn = utf8_to_ids(evidence, ev_ids, 128);
-  int rag_ids[192], rn = 0;
-  for (int i = 0; i < evn && rn < 192; i++) rag_ids[rn++] = ev_ids[i];
-  for (int i = 0; i < plen && rn < 192; i++) rag_ids[rn++] = prompt_ids[i];
+    "肺癌早期常见的症状有咳嗽、咳痰、咳血、胸痛、气促、声音嘶哑、反复发热等。"
+    "这些症状也可能出现在其他呼吸系统疾病中，需要结合影像学检查明确诊断。";
+  // system: "你是一名医学助手，根据提供的参考材料准确回答问题。"
+  const char *sys_msg = "你是一名医学助手，根据提供的参考材料准确回答问题。";
+  char rag_text[512];
+  snprintf(rag_text, sizeof(rag_text),
+           "参考材料：\n%s\n\n问题：肺癌早期症状是什么", evidence);
+  // 组装: system + user (同 minimind apply_chat_template 语义)
+  char full_prompt[640];
+  snprintf(full_prompt, sizeof(full_prompt), "%s\n%s", sys_msg, rag_text);
+  int rag_ids[192], rn = utf8_to_ids(full_prompt, rag_ids, 192);
 
   char outB[1024];
   rng_state = 42;
   int obB = generate(&m, &s, rag_ids, rn, outB, sizeof(outB), max_new);
-  printf("=== [有 RAG] evidence + prompt ===\n%s\n\n", outB);
+  printf("=== [有 RAG] system + 参考材料 ===\n%s\n\n", outB);
 
   // C. RAG evidence reproduction score: how much of evidence appears in output
+  int ev_ids[128];
+  int evn = utf8_to_ids(evidence, ev_ids, 128);
   int ev_covered = 0;
   for (int i = 0; i < evn && i < 30; i++) {
     // check if evidence token appears in output as UTF-8
