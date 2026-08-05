@@ -12,6 +12,10 @@
 #include <stddef.h>
 #include "llm_v5.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // Load model.bin from 'model' partition (mmap'd). Returns 0 ok.
 int llm_engine_load(void);
 
@@ -34,5 +38,9 @@ extern float g_repetition_penalty;
 // Model accessor (for RAG / direct logits).
 Model *llm_engine_model(void);
 Scratch *llm_engine_scratch(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
