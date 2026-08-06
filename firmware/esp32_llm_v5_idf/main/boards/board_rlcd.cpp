@@ -40,7 +40,7 @@ static const char *TAG = "board";
 
 // Firmware version label (header row2 right).  RULE: bump PATCH on every
 // user-visible change, MINOR on milestones.  See AGENTS.md.
-#define FW_VERSION "v5.3.2"
+#define FW_VERSION "v5.3.3"
 
 #define LINE_BUF 1024
 
@@ -297,8 +297,30 @@ static void stream_draw_char(int cp) {
 }
 
 // llm_token_cb_t: 追加 UTF-8 token 到输出区 (自动循环流式显示)
+// 仅隐藏 <think>/</think> 标签本身 (内容照常显示 — 未闭合时防止空白)
+static char s_think_buf[10];   // 跨 token 匹配 <think>/</think> 前缀
+static int  s_think_bn = 0;
+
+static bool think_tag(const char *utf8, int len) {
+    for (int i = 0; i < len; i++) {
+        if (s_think_bn >= (int)sizeof(s_think_buf)) s_think_bn = 0;
+        s_think_buf[s_think_bn++] = utf8[i];
+        // 匹配 <think> (7) 或 </think> (8)
+        if (s_think_bn >= 7 && memcmp(s_think_buf + s_think_bn - 7, "<think>", 7) == 0) {
+            s_think_bn = 0; return true;
+        }
+        if (s_think_bn >= 8 && memcmp(s_think_buf + s_think_bn - 8, "</think>", 8) == 0) {
+            s_think_bn = 0; return true;
+        }
+        // 清理不可能成标签前缀的头部 (窗口限 9 字节)
+        if (s_think_bn > 9) memmove(s_think_buf, s_think_buf + s_think_bn - 9, 9);
+    }
+    return false;
+}
+
 static void stream_token_cb(const char *utf8, int len, void *ctx) {
     (void)ctx;
+    if (think_tag(utf8, len)) return;   // 仅隐藏标签, 内容照常渲染
     for (int i = 0; i < len; i++) {
         // 防止 s_pend[4] 越界: 若缓冲满但非完整字符, 直接按字节丢弃
         if (s_pend_n >= 4) {
@@ -413,7 +435,7 @@ static void auto_run_preset(int idx) {
         prompt_len = p->len;
     }
     int64_t t0 = esp_timer_get_time();
-    int n = llm_engine_generate_stream(ids, prompt_len, stream_token_cb, NULL, 60);
+    int n = llm_engine_generate_stream(ids, prompt_len, stream_token_cb, NULL, 120);
     int64_t t1 = esp_timer_get_time();
     int secs = (int)((t1 - t0) / 1000000);
     float tok_s = secs > 0 ? (float)n / secs : 0.0f;
@@ -432,7 +454,7 @@ static void kbd_run_inference(const int *ids, int len) {
 
     int64_t t0 = esp_timer_get_time();
     static char out[1024];   // 静态: 避免 main task 栈溢出
-    int ob = llm_engine_generate(ids, len, out, sizeof(out), 60);
+    int ob = llm_engine_generate(ids, len, out, sizeof(out), 120);
     int64_t t1 = esp_timer_get_time();
     out[ob] = 0;
 
