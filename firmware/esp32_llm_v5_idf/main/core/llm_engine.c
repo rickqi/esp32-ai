@@ -28,39 +28,47 @@ static const uint8_t *g_model_base = NULL;
 // tok_emb 头 [V,D] 每 token 全量 matvec, 从 flash mmap 读 14MB/次 (dio 80MHz
 // ~40MB/s → 72 tokens ≈ 25-50s, 50x 慢于 host). 启动时把 int4 nibbles 解包为
 // int8 存 PSRAM (一次), 每 token 只做 int8×int8 点积, 不再读 flash.
+// v2 (2026-08-06): 修复 per-group scale 折叠 bug — 原实现只用 group0 的 scale
+// 缩放整行, 但 n_groups>1 (H2: D=384/32=12), 导致输出头 logits 分布破坏。
+// 现改为逐 group 累加 (与 llm_v5.h matvec_q8_range 一致)。
 static int8_t *s_head_w8 = NULL;       // [rows*cols] 解包 int8 权重 (-7..7)
-static float  *s_head_scale = NULL;    // [rows] 每行 dequant scale (n_groups==1)
-static int s_head_rows = 0, s_head_cols = 0;
-static int8_t s_head_actq[512];        // 量化激活 (D=384, 最大输入维)
-static float  s_head_acts;
+static uint16_t *s_head_scales = NULL; // [rows*n_groups] 每行每组 fp16 scale
+static int s_head_rows = 0, s_head_cols = 0, s_head_groups = 0;
 
-// int8 dot -> int32 (S3 SIMD 友好)
-static inline int32_t head_dot_i8(const int8_t *a, const int8_t *b, int n) {
-  int32_t acc = 0;
-  for (int i = 0; i < n; i++) acc += (int32_t)a[i] * (int32_t)b[i];
-  return acc;
-}
-
-// head_matvec 覆盖: 用 staged int8 权重, 每 token 只读 PSRAM
+// head_matvec 覆盖: 用 staged int8 权重, 每 token 只读 PSRAM.
+// v3 (2026-08-06): 改用 fp32 激活 + 逐组反量化 — 消除 int8 激活量化的大误差
+// (实测 int8 激活对 head 引入 max_diff ~4.2, 会扰乱 logits 排序; verify 的
+// matvec_q 路径用 fp32 激活故 PASS, 设备此路径是唯一偏离点)。
 static void head_matvec_int8(const QT *t, const float *x, float *y) {
   (void)t;
-  quantize_act(x, s_head_cols, s_head_actq, &s_head_acts);
-  for (int r = 0; r < s_head_rows; r++)
-    y[r] = (float)head_dot_i8(s_head_actq, s_head_w8 + (size_t)r * s_head_cols,
-                              s_head_cols) * s_head_scale[r] * s_head_acts;
+  int gsize = s_head_cols / s_head_groups;  // group=32 (末组可能短)
+  for (int r = 0; r < s_head_rows; r++) {
+    const int8_t *wrow = s_head_w8 + (size_t)r * s_head_cols;
+    const uint16_t *sc = s_head_scales + (size_t)r * s_head_groups;
+    float acc = 0.f;
+    for (int gi = 0; gi < s_head_groups; gi++) {
+      int begin = gi * gsize, end = begin + gsize;
+      if (end > s_head_cols) end = s_head_cols;
+      float g = 0.f;   // fp32 group dot (权重 int8 反量化 * fp32 激活)
+      for (int j = begin; j < end; j++) g += (float)wrow[j] * x[j];
+      acc += g * half2float(sc[gi]);
+    }
+    y[r] = acc;
+  }
 }
 
 // 启动时把 tok_emb 头解包到 PSRAM (int4 nibbles -> int8, 一次)
 static int stage_head_int8(QT *t) {
   s_head_rows = t->rows;
   s_head_cols = t->cols;
-  if (s_head_cols > (int)sizeof(s_head_actq)) {
-    ESP_LOGE(TAG, "head cols %d > actq %d", s_head_cols, (int)sizeof(s_head_actq));
+  s_head_groups = t->n_groups;
+  if (s_head_cols <= 0 || s_head_groups <= 0) {
+    ESP_LOGE(TAG, "head invalid rows/cols/groups %d/%d/%d", s_head_rows, s_head_cols, s_head_groups);
     return -1;
   }
   s_head_w8 = heap_caps_malloc((size_t)s_head_rows * s_head_cols, MALLOC_CAP_SPIRAM);
-  s_head_scale = heap_caps_malloc((size_t)s_head_rows * sizeof(float), MALLOC_CAP_SPIRAM);
-  if (!s_head_w8 || !s_head_scale) {
+  s_head_scales = heap_caps_malloc((size_t)s_head_rows * s_head_groups * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
+  if (!s_head_w8 || !s_head_scales) {
     ESP_LOGE(TAG, "head staging alloc failed"); return -2;
   }
   for (int r = 0; r < s_head_rows; r++) {
@@ -71,11 +79,14 @@ static int stage_head_int8(QT *t) {
       int code = (j & 1) ? (byte >> 4) : (byte & 0xF);
       dst[j] = (int8_t)(code - 8);
     }
-    s_head_scale[r] = half2float(t->scales[(size_t)r * t->n_groups]);  // n_groups==1
+    // 保存每行全部 n_groups 个 fp16 scale (修复: 原只存 group0 的)
+    memcpy(s_head_scales + (size_t)r * s_head_groups,
+           t->scales + (size_t)r * t->n_groups,
+           (size_t)s_head_groups * sizeof(uint16_t));
   }
-  ESP_LOGI(TAG, "head staged int8: %.2f MB (%d x %d)",
-           ((size_t)s_head_rows * s_head_cols + (size_t)s_head_rows * 4) / 1e6,
-           s_head_rows, s_head_cols);
+  ESP_LOGI(TAG, "head staged int8: %.2f MB (%d x %d, %d groups)",
+           ((size_t)s_head_rows * s_head_cols + (size_t)s_head_rows * s_head_groups * 2) / 1e6,
+           s_head_rows, s_head_cols, s_head_groups);
   return 0;
 }
 

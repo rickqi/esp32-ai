@@ -359,15 +359,16 @@ Scratch s;
 // The head is scanned in full every token and dominates runtime. We stage it as
 // int8 in PSRAM at boot (int4 nibbles unpacked ONCE), so per token there is no
 // nibble unpacking and no float conversion of weights -- just int8 x int8 ->
-// int32 dot per row. Its input dim (D=96) is a single group, so one scale per
-// row. int8-activation quality was validated on host (val perplexity delta ~0,
+// int32 dot per row. int8-activation quality was validated on host (val perplexity delta ~0,
 // see firmware/host_verify/ppl.c). Output rows split across both LX7 cores.
-static int8_t *head_w8 = NULL;      // [rows * cols] unpacked int8 weights (-7..7)
-static float  *head_scale8 = NULL;  // [rows] per-row dequant scale
-static int head_rows, head_cols;
+// v2 (2026-08-06): 修复 per-group scale 折叠 bug — 原实现只用 group0 scale 缩放整行,
+// 但 n_groups>1 (H2: D=384/32=12), 导致输出头 logits 分布破坏。现保存每行全部 group scale
+// 并逐 group 累加 (与 llm_v5.h matvec_q8_range 一致)。
+static int8_t *head_w8 = NULL;        // [rows * cols] unpacked int8 weights (-7..7)
+static uint16_t *head_scales8 = NULL; // [rows * n_groups] fp16 group scales
+static int head_rows, head_cols, head_groups;
 
-static int8_t head_actq[256];  // was 128 - Chinese D=160 overflow       // quantized activation, shared by both cores
-static float  head_acts;            // its scale
+static float head_x[512];           // shared fp32 activation for dual-core head (D=512 max)
 
 // int8 dot -> int32. Tight and branch-free so the S3 int SIMD / -O3 unrolls it.
 static inline int32_t dot_i8(const int8_t *a, const int8_t *b, int n) {
@@ -377,9 +378,20 @@ static inline int32_t dot_i8(const int8_t *a, const int8_t *b, int n) {
 }
 
 static void head_rows_range(float *y, int r0, int r1) {
-  for (int r = r0; r < r1; r++)
-    y[r] = (float)dot_i8(head_actq, head_w8 + (size_t)r * head_cols, head_cols)
-           * head_scale8[r] * head_acts;
+  int gsize = head_cols / head_groups;
+  for (int r = r0; r < r1; r++) {
+    const int8_t *wrow = head_w8 + (size_t)r * head_cols;
+    const uint16_t *sc = head_scales8 + (size_t)r * head_groups;
+    float acc = 0.f;
+    for (int gi = 0; gi < head_groups; gi++) {
+      int begin = gi * gsize, end = begin + gsize;
+      if (end > head_cols) end = head_cols;
+      float g = 0.f;   // fp32 group dot (权重 int8 反量化 * fp32 激活)
+      for (int j = begin; j < end; j++) g += (float)wrow[j] * head_x[j];
+      acc += g * half2float(sc[gi]);
+    }
+    y[r] = acc;
+  }
 }
 
 // dual-core plumbing (worker does the first half of the rows on core 0)
@@ -397,9 +409,10 @@ static void head_worker_main(void *) {
 }
 
 // Matches Model.head_matvec (QT*, float*, float*); QT unused (weights staged).
+// v3 (2026-08-06): fp32 激活 + 逐组反量化 (消除 int8 激活对 head logits 的破坏)。
 static void head_matvec_int8(const QT *t, const float *x, float *y) {
   (void)t;
-  quantize_act(x, head_cols, head_actq, &head_acts);  // once; both cores read it
+  memcpy(head_x, x, (size_t)head_cols * sizeof(float));  // 共享 fp32 激活 (dual-core)
   head_job_y = y;
   head_job_split = head_rows / 2;
   xTaskNotifyGive(head_worker);
@@ -415,9 +428,13 @@ static void *ps(size_t n) {
 
 // Unpack the (row-capped) head from int4 to int8 in PSRAM, once at boot.
 static void stage_head_int8(QT *t) {
-  head_rows = t->rows; head_cols = t->cols;
+  head_rows = t->rows; head_cols = t->cols; head_groups = t->n_groups;
+  if (head_cols > (int)sizeof(head_x)) {
+    Serial.printf("head cols %d > head_x %d\n", head_cols, (int)sizeof(head_x));
+    while (1) delay(1000);
+  }
   head_w8 = (int8_t *)ps((size_t)head_rows * head_cols);
-  head_scale8 = (float *)ps((size_t)head_rows * sizeof(float));
+  head_scales8 = (uint16_t *)ps((size_t)head_rows * head_groups * sizeof(uint16_t));
   for (int r = 0; r < head_rows; r++) {
     const uint8_t *row = t->codes + (size_t)r * t->row_bytes;
     int8_t *dst = head_w8 + (size_t)r * head_cols;
@@ -426,10 +443,14 @@ static void stage_head_int8(QT *t) {
       int code = (j & 1) ? (byte >> 4) : (byte & 0xF);
       dst[j] = (int8_t)(code - 8);
     }
-    head_scale8[r] = half2float(t->scales[(size_t)r * t->n_groups]);  // n_groups==1
+    // 保存每行全部 n_groups 个 fp16 scale (修复: 原只存 group0 的)
+    memcpy(head_scales8 + (size_t)r * head_groups,
+           t->scales + (size_t)r * t->n_groups,
+           (size_t)head_groups * sizeof(uint16_t));
   }
-  Serial.printf("head staged int8: %.2f MB\n",
-                ((size_t)head_rows * head_cols + (size_t)head_rows * 4) / 1e6);
+  Serial.printf("head staged int8: %.2f MB (%d x %d, %d groups)\n",
+                ((size_t)head_rows * head_cols + (size_t)head_rows * head_groups * 2) / 1e6,
+                head_rows, head_cols, head_groups);
 }
 
 static void blink(uint8_t g) {
