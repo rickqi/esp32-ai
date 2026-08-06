@@ -47,15 +47,17 @@ MEDICA_DIR = Path("/mnt/d/docs/raw/medica")
 
 
 def load_entries(max_docs):
-    """Load FULL KB: all V3 entries + all guide sections (no partition cap)."""
+    """Load FULL KB: all V3 entries + all guide sections (no partition cap).
+    v2 (2026-08-06): 对齐 build_guide_kb 医学过滤 — is_medical_label + RE_CLINICAL_HEAD + doc_label."""
     import sys as _sys
     _sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-    from chinese_v4.kb.build_guide_kb import RE_NOISE_HEAD
+    from chinese_v4.kb.build_guide_kb import (RE_NOISE_HEAD, RE_CLINICAL_HEAD,
+                                              doc_label, is_medical_label)
     from chinese_v4.build_sft import split_by_headings, heading_to_questions
     from chinese_v4.prepare import clean_guide_md
 
     entries = []
-    # 1. all V3 KB entries
+    # 1. all V3 KB entries (V3 label 全为科室名, is_medical_label 实际保留全部, 防御性过滤)
     with open(V3_KB, encoding="utf-8", errors="replace") as f:
         for line in f:
             try:
@@ -65,13 +67,15 @@ def load_entries(max_docs):
             q = (d.get("question", "") or "").strip()
             a = (d.get("answer", "") or "").strip()
             label = d.get("label", "")
+            if not is_medical_label(label):
+                continue
             if len(q) >= 3 and len(a) >= 20:
                 entries.append((q, a, label))
             if max_docs and len(entries) >= max_docs:
                 return entries
     print(f"  V3 entries: {len(entries)}")
 
-    # 2. all guide sections (full extraction, no 8K cap)
+    # 2. all guide sections (full extraction, no 8K cap; 医学 label + 临床标题过滤)
     for d in (GUIDE_DIR, MEDICA_DIR):
         if not d.exists():
             continue
@@ -80,12 +84,16 @@ def load_entries(max_docs):
         for m in mds:
             raw = m.read_text(encoding="utf-8", errors="replace")
             cleaned = clean_guide_md(raw)
-            label = "临床指南"
+            label = doc_label(m)
+            if not is_medical_label(label):
+                continue  # 健康管理/理赔/销售等非医学域整文件跳过
             for level, head, body in split_by_headings(cleaned):
                 body_text = "\n".join(body).strip()
-                if len(body_text) < 80 or len(body_text) > 1500:
+                if len(body_text) < 40 or len(body_text) > 1500:
                     continue
                 if RE_NOISE_HEAD.search(head):
+                    continue
+                if not RE_CLINICAL_HEAD.search(head):
                     continue
                 qs = heading_to_questions(head)
                 if not qs:
