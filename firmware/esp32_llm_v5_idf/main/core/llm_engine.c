@@ -190,8 +190,19 @@ void llm_engine_forward(int token, int pos) {
     llm_forward(&g_model, token, pos, &g_scratch);
 }
 
-int llm_engine_generate(const int *prompt_ids, int prompt_len,
-                        char *out, int out_cap, int max_new) {
+// 收集回调: 将流式 token 追加到 out 缓冲 (供 llm_engine_generate 复用)
+struct llm_collect_ctx { char *out; int cap; int *ob; };
+static void llm_engine_collect_token(const char *utf8, int len, void *ctx) {
+    struct llm_collect_ctx *c = (struct llm_collect_ctx *)ctx;
+    if (c && c->out && len > 0 && *c->ob + len < c->cap) {
+        memcpy(c->out + *c->ob, utf8, len);
+        *c->ob += len;
+    }
+}
+
+int llm_engine_generate_stream(const int *prompt_ids, int prompt_len,
+                               llm_token_cb_t on_token, void *ctx,
+                               int max_new) {
     if (!g_ready) return -1;
     int D = g_model.c.dim, L = g_model.c.n_layers, P = g_model.c.ple_dim;
     int F = g_model.c.ffn, V = g_model.c.vocab, S = g_model.c.seq_len;
@@ -203,19 +214,32 @@ int llm_engine_generate(const int *prompt_ids, int prompt_len,
         if (hist_n < 256) hist[hist_n++] = prompt_ids[i];
     }
     int pos = prompt_len;
-    int ob = 0;
+    int n_gen = 0;
     for (int step = 0; step < max_new && pos < S; step++) {
         int tok = sample_token(g_scratch.logits, V, g_sampling_temp,
                                g_sampling_topk, hist, hist_n,
                                g_repetition_penalty);
         if (hist_n < 256) hist[hist_n++] = tok;
-        char ch[8];
-        int cl = decode_token(tok, ch, sizeof(ch));
-        if (cl > 0 && ob < out_cap - cl) { memcpy(out + ob, ch, cl); ob += cl; }
+        if (on_token) {
+            char ch[8];
+            int cl = decode_token(tok, ch, sizeof(ch));
+            if (cl > 0) on_token(ch, cl, ctx);
+        }
+        n_gen++;
         if (tok == 2) break;  // <|endoftext|>
         llm_forward(&g_model, tok, pos, &g_scratch);
         pos++;
     }
+    return n_gen;
+}
+
+int llm_engine_generate(const int *prompt_ids, int prompt_len,
+                        char *out, int out_cap, int max_new) {
+    if (!g_ready || !out || out_cap <= 0) return -1;
+    int ob = 0;
+    struct llm_collect_ctx ctx = { out, out_cap, &ob };
+    int n = llm_engine_generate_stream(prompt_ids, prompt_len,
+        (llm_token_cb_t)llm_engine_collect_token, &ctx, max_new);
     if (ob < out_cap) out[ob] = 0;
-    return ob;
+    return n;
 }

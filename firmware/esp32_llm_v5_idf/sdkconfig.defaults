@@ -39,6 +39,10 @@ CONFIG_ESP_CONSOLE_UART_DEFAULT=y
 # Reduce log noise
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 
+# === FATFS: 长文件名 (term_overlay.bin 13字符超 8.3) + 多 fd (ragsd 3 + XFER) ===
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_MAX_LFILES=8
+
 # LLM inference is CPU-bound in main task (flash mmap + PSRAM, no yield per token)
 # — disable task WDT to avoid false IDLE0 starvation panics
 CONFIG_ESP_TASK_WDT_EN=n

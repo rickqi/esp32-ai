@@ -8,6 +8,7 @@ idf_component_register(
         "boards/board_rlcd.cpp"
         "boards/display_bsp.cpp"
         "boards/keyboard_ble.c"
+        "boards/sd_bsp.c"
     INCLUDE_DIRS
         "."
         "core"

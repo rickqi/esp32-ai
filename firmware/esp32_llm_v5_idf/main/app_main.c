@@ -16,6 +16,8 @@
 #include "llm_engine.h"
 #include "board_rlcd.h"
 #include "keyboard_ble.h"
+#include "sd_bsp.h"
+#include "rag_retrieval.h"
 
 static const char *TAG = "v5_main";
 
@@ -36,6 +38,13 @@ void app_main(void) {
 
     // Board init (LCD, SD, ADC, WiFi, RTC)
     board_init();
+
+    // SD 卡挂载 + RAG 深搜索引 (V3 同款: /sdcard/rag/*.bin)
+    if (sd_mount()) {
+        rag_retrieval_init();
+    } else {
+        ESP_LOGW(TAG, "no SD — RAG disabled");
+    }
 
     // BLE keyboard (HID Host)
     keyboard_ble_init();

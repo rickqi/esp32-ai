@@ -29,10 +29,18 @@
 #include "ui_render.h"
 #include "presets.h"
 #include "prompt_encoder.h"
+#include "bpe_encoder.h"
+#include "rag_retrieval.h"
+#include "rag_sd.h"
+#include "sd_bsp.h"
 #include "driver/usb_serial_jtag.h"
 #include "mbedtls/base64.h"
 
 static const char *TAG = "board";
+
+// Firmware version label (header row2 right).  RULE: bump PATCH on every
+// user-visible change, MINOR on milestones.  See AGENTS.md.
+#define FW_VERSION "v5.3.0"
 
 #define LINE_BUF 1024
 
@@ -81,6 +89,19 @@ static char g_input_buf[80];      // 自由输入缓冲 (ASCII)
 static int g_input_len = 0;
 static bool g_generating = false;
 
+// ---- 自动循环演示状态 (无输入时循环执行预设) ------------------------------
+#define AUTO_IDLE_MS    5000    // 无输入 5s 后启动自动循环
+#define AUTO_NEXT_MS    2000    // 每个预设完成后 2s 执行下一个
+static bool g_auto_mode = false;      // 自动循环激活中
+static int64_t g_last_activity = 0;   // 最后用户输入时间 (esp_timer us)
+static int g_auto_idx = 0;            // 自动循环当前预设
+
+// 流式渲染上下文 (输出区光标)
+static int s_out_x = TEXT_LEFT, s_out_y = OUT_Y;
+static int s_out_col = 0;   // 当前行字符数 (换行判断)
+static int g_stream_tok = 0;     // 当前推理已生成 token 数 (实时 footer)
+static int64_t g_stream_t0 = 0;  // 当前推理起始时间
+
 // ---- TUI 渲染 (V3 风格 3-zone) ---------------------------------------------
 // 全屏边框 + 2 条分隔线 (一次绘制后 RLCD_Display, 避免逐元素 flush)
 static void ui_draw_frame(void) {
@@ -101,7 +122,8 @@ static void ui_draw_header(void) {
     if (tx < TEXT_LEFT) tx = TEXT_LEFT;
     ui_text_2x_inv(g_display, tx, HDR_Y1 + 1, title);
 
-    // Row 2: 反色信息条 — 左:BT 状态 | 中:模式 | 右:预设位置/输入长度
+    // Row 2: 反色信息条 — 左:BT 状态 | 中:模式 | 右:版本号/输入长度
+    // (右不再显示 [n/22] — 与输入区预设编号重复; 版本号对齐 V3 header 设计)
     ui_fill_rect(g_display, TUI_LEFT + 1, HDR2_Y1, TUI_RIGHT - 1, HDR2_Y2);
     int y = HDR2_Y1 + 1;
     const char *bt = keyboard_ble_connected() ? "BT:ON " : "BT:OFF";
@@ -112,32 +134,63 @@ static void ui_draw_header(void) {
     ui_text_inv(g_display, mx, y, mode);
     char right[24];
     if (g_kbd_mode == KBD_MODE_PRESET)
-        snprintf(right, sizeof(right), "[%d/%d]", g_preset_idx + 1, KBD_PRESET_COUNT);
+        snprintf(right, sizeof(right), FW_VERSION);
     else
         snprintf(right, sizeof(right), "%dch", g_input_len);
     ui_text_inv(g_display, TEXT_RIGHT - strlen(right) * UI_CW, y, right);
 }
 
-// 反色 footer: 推理统计 t/s | ms | 模型 | token | 秒 (V3 风格, 去掉 RAG)
+// 反色 footer: 推理统计 (动态宽度布局, 保证不重叠)
+// 字段: t/s | ms | V词表 | RAG索引 | N token | 秒
+// 每个字段按实际字符数推进, 字段间留 GAP 像素, 无固定宽度步进.
+#define FTR_GAP 6   // 字段间像素间隙
+
 static void ui_draw_footer(float tok_s, int ms, int ntok, int secs) {
     ui_fill_rect(g_display, TUI_LEFT, FTR_Y1, TUI_RIGHT, FTR_Y2);
     int y = FTR_Y1 + 2;
     char buf[24];
     int x = TEXT_LEFT;
+    int w;   // 当前字段像素宽
+
+    // t/s (7 字符固定)
     snprintf(buf, sizeof(buf), "%4.1ft/s", tok_s);
     ui_text_inv(g_display, x, y, buf);
-    x += 7 * UI_CW + 4;
-    snprintf(buf, sizeof(buf), "%3dms", ms);
+    w = (int)strlen(buf) * UI_CW;
+    x += w + FTR_GAP;
+
+    // ms (动态 2-4 字符)
+    snprintf(buf, sizeof(buf), "%dms", ms);
     ui_text_inv(g_display, x, y, buf);
-    x += 5 * UI_CW + 4;
+    w = (int)strlen(buf) * UI_CW;
+    x += w + FTR_GAP;
+
+    // V词表 (固定 V6400 = 6 字符)
     snprintf(buf, sizeof(buf), "V%u", (unsigned)VOCAB_N);
     ui_text_inv(g_display, x, y, buf);
-    x += 6 * UI_CW + 4;
+    w = (int)strlen(buf) * UI_CW;
+    x += w + FTR_GAP;
+
+    // RAG 索引状态 (动态: RAG137K 7字 / noRAG 5字)
+    if (rag_retrieval_ready()) {
+        snprintf(buf, sizeof(buf), "RAG%uK",
+                 (unsigned)(rag_retrieval_doc_count() / 1000));
+    } else {
+        snprintf(buf, sizeof(buf), "noRAG");
+    }
+    ui_text_inv(g_display, x, y, buf);
+    w = (int)strlen(buf) * UI_CW;
+    x += w + FTR_GAP;
+
+    // N token (动态)
     snprintf(buf, sizeof(buf), "N%d", ntok);
     ui_text_inv(g_display, x, y, buf);
-    x += 5 * UI_CW + 4;
+    w = (int)strlen(buf) * UI_CW;
+    x += w + FTR_GAP;
+
+    // 秒 (动态, 左对齐跟随 — 消除右侧空白, 保证不重叠)
     snprintf(buf, sizeof(buf), "%ds", secs);
     ui_text_inv(g_display, x, y, buf);
+
     g_display->RLCD_Display();
 }
 
@@ -222,6 +275,156 @@ static void render_output_text(const char *out, int ob) {
     g_display->RLCD_Display();
 }
 
+// ---- 流式渲染: 每生成一个 token 追加显示到输出区 ---------------------------
+// 处理 UTF-8 多字节字符: 不足一字的字节先缓存, 完整后画字符.
+static char s_pend[4];
+static int s_pend_n = 0;
+
+static void stream_draw_char(int cp) {
+    // 画单个字符到当前光标, 处理换行
+    if (cp == '\n') { s_out_x = TEXT_LEFT; s_out_y += UI_ROW_H; s_out_col = 0; return; }
+    if (cp >= 32 && cp < 0x80) {
+        if (s_out_col >= 26 || s_out_x + UI_CW > TEXT_RIGHT) { s_out_x = TEXT_LEFT; s_out_y += UI_ROW_H; s_out_col = 0; }
+        if (s_out_y + UI_ROW_H > OUT_BOT) { s_out_y = OUT_Y; s_out_x = TEXT_LEFT; s_out_col = 0; }
+        ui_draw_char(g_display, s_out_x, s_out_y + (UI_ROW_H - UI_CH) / 2, (unsigned char)cp);
+        s_out_x += UI_CW; s_out_col++;
+    } else if (cp >= 0x80) {
+        if (s_out_col >= 26 || s_out_x + UI_CJK_W > TEXT_RIGHT) { s_out_x = TEXT_LEFT; s_out_y += UI_ROW_H; s_out_col = 0; }
+        if (s_out_y + UI_ROW_H > OUT_BOT) { s_out_y = OUT_Y; s_out_x = TEXT_LEFT; s_out_col = 0; }
+        ui_draw_cjk(g_display, s_out_x, s_out_y, cp);
+        s_out_x += UI_CJK_W; s_out_col++;
+    }
+}
+
+// llm_token_cb_t: 追加 UTF-8 token 到输出区 (自动循环流式显示)
+static void stream_token_cb(const char *utf8, int len, void *ctx) {
+    (void)ctx;
+    for (int i = 0; i < len; i++) {
+        // 防止 s_pend[4] 越界: 若缓冲满但非完整字符, 直接按字节丢弃
+        if (s_pend_n >= 4) {
+            s_pend_n = 0;
+        }
+        s_pend[s_pend_n++] = utf8[i];
+        // 判断是否凑齐一个完整 UTF-8 字符
+        int need;
+        unsigned char b0 = (unsigned char)s_pend[0];
+        if (b0 < 0x80) need = 1;
+        else if ((b0 & 0xE0) == 0xC0) need = 2;
+        else if ((b0 & 0xF0) == 0xE0) need = 3;
+        else need = 4;
+        if (s_pend_n >= need) {
+            int clen = s_pend_n;
+            int cp = ui_utf8_decode((const unsigned char *)s_pend, clen, &clen);
+            if (cp >= 0) stream_draw_char(cp);
+            s_pend_n = 0;
+        }
+    }
+    // 实时 footer: 每 token 更新 tok/s (基于当前推理耗时)
+    g_stream_tok++;
+    int64_t now = esp_timer_get_time();
+    int el = (int)((now - g_stream_t0) / 1000000);
+    float ts = el > 0 ? (float)g_stream_tok / el : 0.0f;
+    int mp = g_stream_tok > 0 ? (int)((now - g_stream_t0) / 1000 / g_stream_tok) : 0;
+    ui_draw_footer(ts, mp, g_stream_tok, el);
+}
+
+// ---- RAG 证据注入 (设备端 BPE 编码) ----------------------------------------
+// 检索证据 → bpe_encode → 组装 ChatML (系统+证据+问题+assistant).
+// 返回完整 prompt token ids 数 (<= max_ids). 无 RAG 时退回纯问题.
+// 注意: 与 prompt_encoder.c PE_SYSTEM_PROMPT 字节级一致.
+static const char RAG_SYSTEM_PROMPT[] = "你是一个医学助手，请根据提供的参考资料准确回答问题。";
+
+static int build_rag_prompt(const char *question_text, int *ids, int max_ids) {
+    if (max_ids < 16) return 0;
+
+    // 1. 检索证据 (SD RAG, 若就绪)
+    char evidence[RAGSD_DOC_CAP * RAGSD_MAX_DOCS + 8] = "";
+    bool has_ev = false;
+    if (rag_retrieval_ready() && question_text && *question_text) {
+        int elen = rag_retrieval_retrieve(question_text, evidence, sizeof(evidence) - 1);
+        if (elen > 0) { evidence[elen] = 0; has_ev = true; }
+    }
+
+    // 2. BPE 编码各段 (系统/证据/问题/assistant)
+    int n = 0;
+
+    // <im_start>system\n{system}<im_end>\n
+    ids[n++] = 1;
+    n += bpe_encode("system\n", ids + n, max_ids - n);
+    n += bpe_encode(RAG_SYSTEM_PROMPT, ids + n, max_ids - n);
+    ids[n++] = 2;
+    n += bpe_encode("\n", ids + n, max_ids - n);
+
+    // <im_start>user\n
+    ids[n++] = 1;
+    n += bpe_encode("user\n", ids + n, max_ids - n);
+
+    // 证据注入: "参考资料：\n{evidence}\n\n"
+    if (has_ev) {
+        n += bpe_encode("参考资料：\n", ids + n, max_ids - n);
+        n += bpe_encode(evidence, ids + n, max_ids - n);
+        n += bpe_encode("\n\n", ids + n, max_ids - n);
+    }
+
+    // 问题：{q}<im_end>\n
+    n += bpe_encode("问题：", ids + n, max_ids - n);
+    n += bpe_encode(question_text, ids + n, max_ids - n);
+    ids[n++] = 2;
+    n += bpe_encode("\n", ids + n, max_ids - n);
+
+    // <im_start>assistant\n
+    ids[n++] = 1;
+    n += bpe_encode("assistant\n", ids + n, max_ids - n);
+
+    ESP_LOGI(TAG, "RAG prompt: %d tok, evidence=%s", n, has_ev ? "YES" : "NO");
+    return n;
+}
+
+// 自动循环执行一个预设 (流式显示)
+static void auto_run_preset(int idx) {
+    if (idx >= KBD_PRESET_COUNT) idx = 0;
+    g_preset_idx = idx;
+    g_kbd_mode = KBD_MODE_PRESET;
+    g_generating = true;
+
+    // 重置流式渲染状态 (关键: 防止跨推理残留导致崩溃/错位)
+    s_pend_n = 0;
+    s_out_x = TEXT_LEFT; s_out_y = OUT_Y; s_out_col = 0;
+    g_stream_tok = 0;
+    g_stream_t0 = esp_timer_get_time();
+
+    // 更新输入区显示当前预设 + 清输出区
+    ui_render_input();
+    ui_clear_rect(g_display, TEXT_LEFT, OUT_Y, TEXT_RIGHT, OUT_BOT);
+    g_display->RLCD_Display();
+    ESP_LOGI(TAG, "auto: preset[%d] %s", idx, kbd_presets[idx].text);
+
+    // 构建 RAG prompt (检索证据 + BPE 编码) 或回退预设 ids
+    const KbdPreset *p = &kbd_presets[idx];
+    static int ids[PE_MAX_PROMPT + 8];
+    int prompt_len;
+    if (rag_retrieval_ready()) {
+        prompt_len = build_rag_prompt(p->text, ids, PE_MAX_PROMPT + 8);
+        if (prompt_len <= 0) {
+            for (int i = 0; i < p->len && i < PE_MAX_PROMPT + 8; i++) ids[i] = p->ids[i];
+            prompt_len = p->len;
+        }
+    } else {
+        for (int i = 0; i < p->len && i < PE_MAX_PROMPT + 8; i++) ids[i] = p->ids[i];
+        prompt_len = p->len;
+    }
+    int64_t t0 = esp_timer_get_time();
+    int n = llm_engine_generate_stream(ids, prompt_len, stream_token_cb, NULL, 60);
+    int64_t t1 = esp_timer_get_time();
+    int secs = (int)((t1 - t0) / 1000000);
+    float tok_s = secs > 0 ? (float)n / secs : 0.0f;
+    int ms_per_tok = n > 0 ? (int)((t1 - t0) / 1000 / n) : 0;
+    ui_draw_footer(tok_s, ms_per_tok, n, secs);   // 最终统计 (覆盖实时值)
+    ESP_LOGI(TAG, "auto: done %d tokens in %ds", n, secs);
+    g_generating = false;
+    g_last_activity = esp_timer_get_time();  // 完成也算活动, 控制间隔
+}
+
 static void kbd_run_inference(const int *ids, int len) {
     g_generating = true;
     // 清空输出区 (保留边框/TUI)
@@ -251,11 +454,19 @@ static void kbd_enter_pressed(void) {
     int len = 0;
 
     if (g_kbd_mode == KBD_MODE_PRESET) {
-        // 预设: 直接用预烘焙 ids
+        // 预设: 用 RAG 证据注入 (若 SD RAG 就绪) 或预烘焙 ids
         const KbdPreset *p = &kbd_presets[g_preset_idx];
-        len = p->len;
-        for (int i = 0; i < len && i < PE_MAX_PROMPT + 8; i++) ids[i] = p->ids[i];
         ESP_LOGI(TAG, "preset[%d]: %s", g_preset_idx, p->text);
+        if (rag_retrieval_ready()) {
+            len = build_rag_prompt(p->text, ids, PE_MAX_PROMPT + 8);
+            if (len <= 0) {
+                for (int i = 0; i < p->len && i < PE_MAX_PROMPT + 8; i++) ids[i] = p->ids[i];
+                len = p->len;
+            }
+        } else {
+            for (int i = 0; i < p->len && i < PE_MAX_PROMPT + 8; i++) ids[i] = p->ids[i];
+            len = p->len;
+        }
     } else {
         // 自由输入: 编码 + ChatML
         if (g_input_len == 0) { ESP_LOGW(TAG, "empty input"); return; }
@@ -372,6 +583,91 @@ static void take_screenshot(void) {
   free(pbm);
 }
 
+// ---- COM → SD 文件传输 (XFER) ----------------------------------------------
+// 协议:
+//   PC → MCU: "XFER <filename> <size>\n"   (filename 不含路径, 写入 /sdcard/rag/)
+//   MCU → PC: "XFER_OK\n"                  (就绪, 开始发数据)
+//   PC → MCU: 256B 块 (原始二进制) — 匹配 USB-Serial-JTAG 单次传输上限
+//   MCU → PC: "XFER_ACK_<n>\n"    (每块 ACK, 序号递增, 流控)
+//   PC → MCU: 剩余字节 (发完全部 size 字节)
+//   MCU → PC: "XFER_DONE\n"       (写完关闭)
+// 安全: 文件名白名单 (仅 index/docs/meta), 防路径穿越.
+#define XFER_CHUNK 256
+
+static void do_xfer(char *args) {
+    if (!sd_ready()) { printf("ERR: no SD\n"); return; }
+    // 解析 "<filename> <size>"
+    char fname[32];
+    long fsize = 0;
+    int n = sscanf(args, "%31s %ld", fname, &fsize);
+    if (n != 2 || fsize <= 0 || fsize > (64L * 1024 * 1024)) {
+        printf("ERR: bad xfer args\n");
+        return;
+    }
+    // 文件名白名单 (防路径穿越): 仅允许 rag 索引文件
+    if (strcmp(fname, "index.bin") != 0 && strcmp(fname, "docs.bin") != 0 &&
+        strcmp(fname, "meta.bin") != 0 && strcmp(fname, "term_overlay.bin") != 0) {
+        printf("ERR: filename not allowed\n");
+        return;
+    }
+    // 就绪信号
+    printf("XFER_OK\n");
+
+    char path[64];
+    snprintf(path, sizeof(path), "/sdcard/rag/%s", fname);
+    FILE *f = fopen(path, "wb");
+    if (!f) { printf("ERR: open failed\n"); return; }
+
+    // 8KB 内部 SRAM 缓冲 (DMA 友好, 避免 PSRAM 直写)
+    uint8_t *buf = (uint8_t *)heap_caps_malloc(XFER_CHUNK, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    if (!buf) { fclose(f); printf("ERR: no buf\n"); return; }
+
+    long remaining = fsize;
+    int ok = 1;
+    int chunk_n = 0;
+    while (remaining > 0) {
+        size_t want = remaining < XFER_CHUNK ? remaining : XFER_CHUNK;
+        size_t got = 0;
+        int idle = 0;
+        while (got < want) {
+            // 请求剩余全部 — USB-Serial-JTAG 单次最多 ~256B, 循环累积
+            int r = usb_serial_jtag_read_bytes(buf + got, want - got,
+                                               pdMS_TO_TICKS(200));
+            if (r <= 0) {
+                if (++idle > 50) {   // 10s 无数据则放弃
+                    ESP_LOGE(TAG, "xfer read timeout chunk=%d got=%d want=%d",
+                             chunk_n, (int)got, (int)want);
+                    ok = 0;
+                    break;
+                }
+                continue;
+            }
+            got += r;
+            idle = 0;
+        }
+        if (!ok) break;
+        if (fwrite(buf, 1, want, f) != want) {
+            printf("ERR: write failed\n");
+            ok = 0;
+            break;
+        }
+        remaining -= want;
+        chunk_n++;
+        // 独特 ACK 带序号 — 防二进制数据流中的 "OK" 误判 (PC 按行匹配前缀)
+        printf("XFER_ACK_%d\n", chunk_n);
+        ESP_LOGI(TAG, "xfer chunk %d: %d bytes (%ld left)", chunk_n,
+                 (int)want, remaining);
+    }
+    fclose(f);
+    free(buf);
+    if (ok) {
+        printf("XFER_DONE\n");
+        ESP_LOGI(TAG, "xfer %s: %ld bytes written", fname, fsize);
+    }
+    // 刷新活动时间 — 防止 XFER 长阻塞后 auto 立即启动吞掉下一条命令
+    g_last_activity = esp_timer_get_time();
+}
+
 // ---- UART JSON prompt (保留 COM 输入兼容) --------------------------------
 static void handle_json_prompt(char *json) {
     ESP_LOGI(TAG, "HJP-ENTER buf=[%.60s]", json);
@@ -438,7 +734,9 @@ void board_init(void) {
     ui_draw_header();
     ui_render_input();
     ui_draw_footer(0, 0, 0, 0);
+    g_last_activity = esp_timer_get_time();   // 自动循环计时起点
     ESP_LOGI(TAG, "board ready — keyboard UI: [Tab] preset/text, [Up/Dn] nav, [Enter] run");
+    ESP_LOGI(TAG, "auto-demo: %ds idle -> loop presets (streaming)", AUTO_IDLE_MS / 1000);
 }
 
 void board_loop(void) {
@@ -446,6 +744,22 @@ void board_loop(void) {
     int loop_count = 0;
     while (1) {
         if ((++loop_count % 5000) == 0) ESP_LOGI(TAG, "loop heartbeat %d", loop_count);
+
+        // 自动循环调度: 无输入空闲超时 -> 执行下一个预设
+        int64_t now = esp_timer_get_time();
+        if (!g_generating && !g_auto_mode &&
+            now - g_last_activity > AUTO_IDLE_MS * 1000) {
+            g_auto_mode = true;
+            g_auto_idx = 0;
+            ESP_LOGI(TAG, "auto mode start (idle %ds)", AUTO_IDLE_MS / 1000);
+        }
+        if (g_auto_mode && !g_generating) {
+            if (now - g_last_activity > AUTO_NEXT_MS * 1000) {
+                auto_run_preset(g_auto_idx);
+                g_auto_idx = (g_auto_idx + 1) % KBD_PRESET_COUNT;
+            }
+        }
+
         uint8_t c;
         int r = usb_serial_jtag_read_bytes(&c, 1, pdMS_TO_TICKS(10));
         if (r == 1) {
@@ -453,8 +767,11 @@ void board_loop(void) {
                 line_buf[line_pos] = 0;
                 line_pos = 0;
                 if (line_buf[0] == '{') {
+                    g_auto_mode = false;   // 用户输入打断自动循环
+                    g_last_activity = esp_timer_get_time();
                     handle_json_prompt(line_buf);
                 } else if (strcmp(line_buf, "BTSCAN") == 0) {
+                    g_last_activity = esp_timer_get_time();
                     keyboard_ble_scan();
                 } else if (strcmp(line_buf, "SHOOT") == 0) {
                     take_screenshot();
@@ -462,7 +779,21 @@ void board_loop(void) {
                     // KEY <hex> — 模拟键盘按键 (0x51=Down, 0x52=Up, 0x28=Enter, 0x2B=Tab)
                     uint8_t kc = (uint8_t)strtol(line_buf + 4, NULL, 16);
                     ESP_LOGI(TAG, "KEY sim 0x%02x", kc);
+                    g_auto_mode = false;   // 用户按键打断自动循环
+                    g_last_activity = esp_timer_get_time();
                     board_key_cb(kc, 0);
+                } else if (strncmp(line_buf, "XFER ", 5) == 0) {
+                    // XFER <filename> <size> — COM → SD 文件传输
+                    g_auto_mode = false;
+                    g_last_activity = esp_timer_get_time();
+                    do_xfer(line_buf + 5);
+                } else if (strncmp(line_buf, "RAGQ ", 5) == 0) {
+                    // RAGQ <问题> — 调试: 打印设备端检索证据 (验证索引质量)
+                    g_auto_mode = false;
+                    g_last_activity = esp_timer_get_time();
+                    char ev[256];
+                    int rn = rag_retrieval_retrieve(line_buf + 5, ev, sizeof(ev));
+                    ESP_LOGI(TAG, "RAGQ [%s] -> %d docs: %.120s", line_buf + 5, rn, ev);
                 }
             } else if (c != '\r' && line_pos < LINE_BUF - 1) {
                 line_buf[line_pos++] = (char)c;

@@ -27,6 +27,15 @@ bool llm_engine_ready(void);
 int llm_engine_generate(const int *prompt_ids, int prompt_len,
                         char *out, int out_cap, int max_new);
 
+// 流式生成回调: 每生成一个 token 调用 on_token(utf8 字节, len, ctx).
+typedef void (*llm_token_cb_t)(const char *utf8, int len, void *ctx);
+
+// 流式生成: prefill 后逐 token 生成并回调 (供 UI 实时显示).
+// 返回生成 token 数. on_token 为 NULL 时退化为 llm_engine_generate 行为.
+int llm_engine_generate_stream(const int *prompt_ids, int prompt_len,
+                               llm_token_cb_t on_token, void *ctx,
+                               int max_new);
+
 // Low-level: forward one token (for incremental use / RAG).
 void llm_engine_forward(int token, int pos);
 

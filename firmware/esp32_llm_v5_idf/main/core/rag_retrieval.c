@@ -27,6 +27,10 @@ void rag_retrieval_init(void) {
 
 bool rag_retrieval_ready(void) { return g_rag_sd_ready; }
 
+uint32_t rag_retrieval_doc_count(void) {
+    return g_rag_sd_ready ? g_rag_sd.n_docs : 0;
+}
+
 int rag_retrieval_retrieve(const char *question, char *out_ev, int out_cap) {
     if (!g_rag_sd_ready || !question || !out_ev) return 0;
     uint32_t best[RAGSD_TOP_K];

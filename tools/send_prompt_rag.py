@@ -197,22 +197,28 @@ def main():
     else:
         docs, inv, idf = None, None, None
 
-    # 串口
+    # 打开串口
     try:
         ser = serial.Serial(args.port, args.baud, timeout=10)
     except serial.SerialException as exc:
         sys.exit(f"Serial error: {exc}")
+    # 复位设备 (DTR 触发) — 设备只在启动时打印 ready, 否则会卡在等待
+    ser.setDTR(False); time.sleep(0.2)
+    ser.setDTR(True)
     ser.reset_input_buffer()
-    print(f"Serial: {args.port} @ {args.baud}")
+    print(f"Serial: {args.port} @ {args.baud} (device reset)")
 
-    # 等待设备就绪
-    print("等待设备启动...")
+    # 等待设备就绪 (启动后 5s 内必须发送, 否则 auto 循环启动)
+    print("等待设备就绪...")
+    ready_t0 = time.time()
     while True:
         raw = ser.readline()
         if not raw:
+            if time.time() - ready_t0 > 15:
+                sys.exit("[ERR] 设备 15s 内未就绪")
             continue
         line = raw.decode("utf-8", errors="replace").strip()
-        if '"ready"' in line:
+        if 'ready' in line:
             break
     print("设备就绪.\n")
 
