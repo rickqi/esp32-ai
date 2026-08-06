@@ -40,7 +40,7 @@ static const char *TAG = "board";
 
 // Firmware version label (header row2 right).  RULE: bump PATCH on every
 // user-visible change, MINOR on milestones.  See AGENTS.md.
-#define FW_VERSION "v5.3.1"
+#define FW_VERSION "v5.3.2"
 
 #define LINE_BUF 1024
 
@@ -366,8 +366,7 @@ static int build_rag_prompt(const char *question_text, int *ids, int max_ids) {
         n += bpe_encode("\n\n", ids + n, max_ids - n);
     }
 
-    // 问题：{q}<im_end>\n
-    n += bpe_encode("问题：", ids + n, max_ids - n);
+    // {q}<im_end>\n  (MiniMind SFT 格式: user 消息直接内容, 无"问题："前缀)
     n += bpe_encode(question_text, ids + n, max_ids - n);
     ids[n++] = 2;
     n += bpe_encode("\n", ids + n, max_ids - n);

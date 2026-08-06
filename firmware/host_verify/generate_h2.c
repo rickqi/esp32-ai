@@ -80,6 +80,8 @@ static int sample_token(float *logits, int n, float temp, int topk,
 int main(int argc, char **argv) {
   const char *bin = argc > 1 ? argv[1] : "firmware/model_v5/H2/model_llm.bin";
   int max_new = argc > 3 ? atoi(argv[3]) : 100;
+  float temp = argc > 4 ? atof(argv[4]) : 0.8f;
+  float rep  = argc > 5 ? atof(argv[5]) : 1.3f;
   size_t n;
   uint8_t *buf = read_file(bin, &n);
   Model m;
@@ -100,10 +102,10 @@ int main(int argc, char **argv) {
   s.vcache = malloc((size_t)L * S * D * 4);
 
   // parse prompt token ids from argv[2] ("1 500 1000 200 42 777 13 99")
-  int prompt[64], plen = 0;
+  int prompt[256], plen = 0;
   if (argc > 2) {
     char *p = argv[2];
-    while (*p && plen < 64) {
+    while (*p && plen < 256) {
       while (*p == ' ') p++;
       if (!*p) break;
       prompt[plen++] = atoi(p);
@@ -126,11 +128,27 @@ int main(int argc, char **argv) {
   // generation
   int pos = plen;
   char out_buf[4096]; int ob = 0;
+  // DEBUG: 打印第一轮 logits top-10 (对比 GPU)
+  {
+    printf("\nfirst-step logits top-10:");
+    int idx[10] = {0}; float val[10] = {-1e30f};
+    for (int v = 0; v < V; v++) {
+      float l = s.logits[v];
+      for (int k = 0; k < 10; k++) {
+        if (l > val[k]) { for (int j = 9; j > k; j--) { val[j]=val[j-1]; idx[j]=idx[j-1]; } val[k]=l; idx[k]=v; break; }
+      }
+    }
+    for (int k = 0; k < 10; k++) {
+      char ch[8]; decode_token(idx[k], ch, sizeof(ch));
+      printf(" %d(%s):%.2f", idx[k], ch, val[k]);
+    }
+    printf("\n");
+  }
   for (int step = 0; step < max_new && pos < S; step++) {
     float *logits = s.logits;
     // read head logits: llm_forward leaves logits at final step? verify.c pattern:
     // we need head matvec — llm_forward should fill s.logits for the token.
-    int tok = sample_token(logits, V, 0.8f, 40, hist, hist_n, 1.3f);
+    int tok = sample_token(logits, V, temp, 40, hist, hist_n, rep);
     if (hist_n < 256) hist[hist_n++] = tok;
     char ch[8]; int cl = decode_token(tok, ch, sizeof(ch));
     if (cl > 0 && ob < sizeof(out_buf) - cl) { memcpy(out_buf + ob, ch, cl); ob += cl; }

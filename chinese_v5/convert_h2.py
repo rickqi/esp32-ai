@@ -34,11 +34,11 @@ from pathlib import Path
 sys.stdout.reconfigure(encoding="utf-8")
 
 
-def read_q_minimind(d, p, rows, cols):
+def read_q_minimind(d, p, rows, cols, bits=4):
     """Read MiniMind Q tensor (no bits byte). Returns (packed_bytes, scales_bytes, next_p)."""
     g = struct.unpack("<i", d[p:p + 4])[0]; p += 4
     ng = (cols + g - 1) // g
-    rb = (cols + 1) // 2
+    rb = cols if bits == 8 else (cols + 1) // 2   # 8bit: 1 byte/code
     codes_n = rows * rb
     scales_n = rows * ng * 2
     codes = d[p:p + codes_n]; p += codes_n
@@ -50,6 +50,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--in", dest="inp", default="firmware/model_v5/H2/model.bin")
     ap.add_argument("--out", dest="out", default="firmware/model_v5/H2/model_llm.bin")
+    ap.add_argument("--bits", type=int, default=4, choices=[4, 8], help='Q tensor bits (must match export_ple1.py --bits)')
     args = ap.parse_args()
 
     d = Path(args.inp).read_bytes()
@@ -86,7 +87,7 @@ def main():
     tensors = []  # (kind, rows, cols, data_or_None)
     for kind, r, c in plan:
         if kind == "Q":
-            codes, scales, p, g = read_q_minimind(d, p, r, c)
+            codes, scales, p, g = read_q_minimind(d, p, r, c, bits=args.bits)
             tensors.append((kind, r, c, codes, scales, g))
         else:
             nbytes = r * c * 4
@@ -100,7 +101,7 @@ def main():
 
     def w_q(r, c, codes, scales, g):
         nonlocal out
-        out.append(4)                    # bits = 4
+        out.append(args.bits)               # bits = 4/8
         out += struct.pack("<i", g)
         out += codes
         out += scales
