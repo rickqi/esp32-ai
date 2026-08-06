@@ -39,7 +39,8 @@ RE_NOISE_HEAD = re.compile(
 RE_CLINICAL_HEAD = re.compile(
     r"(诊断|治疗|预防|用药|管理|规范|指南|护理|康复|预后|症状|综合征|病|炎|"
     r"癌|瘤|感染|损伤|评估|筛查|标准|原则|适应证|禁忌|随访|监测|分期|分级|"
-    r"急救|中毒|出血|休克|发热|疼痛|方案|流程|操作|检查|检验|影像|病理)")
+    r"急救|中毒|出血|休克|发热|疼痛|方案|流程|操作|检查|检验|影像|病理|"
+    r"变性|肝豆状核|视网膜色素变性|黄斑变性)")
 
 
 def doc_label(path):
@@ -70,6 +71,14 @@ def doc_label(path):
     return "临床指南"
 
 
+NON_MEDICAL_LABEL = ['健康管理', '理赔', '产品条款', '销售', '消保']
+
+
+def is_medical_label(label):
+    """排除保险/健康管理域 (与 minimind rag_medical.py med_only 对齐)."""
+    return not any(k in label for k in NON_MEDICAL_LABEL)
+
+
 def extract_entries(max_entries):
     entries = []
     eid = 10_000_000
@@ -82,9 +91,11 @@ def extract_entries(max_entries):
             raw = m.read_text(encoding="utf-8", errors="replace")
             cleaned = clean_guide_md(raw)
             label = doc_label(m)
+            if not is_medical_label(label):
+                continue  # 健康管理/理赔/销售等非医学域整文件跳过
             for level, head, body in split_by_headings(cleaned):
                 body_text = "\n".join(body).strip()
-                if len(body_text) < 80 or len(body_text) > 1500:
+                if len(body_text) < 40 or len(body_text) > 1500:
                     continue
                 if RE_NOISE_HEAD.search(head):
                     continue
@@ -133,11 +144,14 @@ def main():
                     continue
                 v3_entries.append(d)
         print(f"  v3 entries: {len(v3_entries)}")
+        # V3 只保留医学条目 (与 guide 医学过滤一致)
+        v3_entries = [e for e in v3_entries if is_medical_label(e.get("label", ""))]
+        print(f"  v3 medical entries: {len(v3_entries)}")
         import random
         rng = random.Random(42)
         rng.shuffle(v3_entries)
-        # guides (up to ~8K) + v3 fill to ~11K total
-        guide_n = min(len(entries), 8000)
+        # guides priority (cover disease chapters incl. 肝豆状核变性), V3 fill to 2MB budget
+        guide_n = min(len(entries), 10500)
         budget = 11000 - guide_n
         merged = entries[:guide_n] + v3_entries[:max(budget, 0)]
         entries = merged
