@@ -1,0 +1,105 @@
+# RAG 索引方案分析 (2026-08-06)
+
+> 供 esp32-ai 项目决策。基于 V5_RAG_verification_20260805.md (权威验证) + minimind 侧 2026-08-06 KB/索引修复实况。
+> 目标: 明确三条索引链的现状、质量、代价, 给出实际选择建议。
+
+---
+
+## 1. 三条索引链现状总览
+
+| 维度 | **Index A: PC jieba** | Index B: 单字 SD | Index C: flash kb (RAG1) |
+|---|---|---|---|
+| 位置 | `minimind/out/rag_index.pkl` (PC) | `data_v4/sd_rag/{index,docs,meta}.bin` | `data_v4/kb/index.bin` |
+| 数据源 | `data_v4/kb/format_data.jsonl` (11000 医学) | V3 KB + 全量指南 (136,877) | kb 采样 ~30K |
+| 检索 | jieba 词 IDF | 单字 IDF | 字符 IDF |
+| docs/terms | 11,000 / 29,849 (词) | 136,877 / 5,099 (字) | ~30K / char ids |
+| 证据长度 | 60 字 | 40 字 | 50 字 |
+| V5 使用 | ✅ **唯一活链** (PC 注入) | ❌ 死代码 (MM_MINIMIND) | ❌ 仅 v2/v4 |
+
+**架构事实**: `esp32_llm_zh_v5.ino:28` 定义 `MM_MINIMIND`; `:633` `#ifndef` 包裹 `rag_augment_prompt()` → 设备端检索(含 SD deep)永不执行。RAG 证据 100% 由 PC 端 jieba 检索 + MiniMind BPE 编码后串口注入。
+
+---
+
+## 2. 检索质量实证 (17 查询对比, 来自权威验证文档)
+
+| 查询 | Index A (jieba) | Index B (单字 SD) |
+|---|---|---|
+| 宫外孕 | ❌ 植发 (错) | ✅ HCG 妇产科 (对) |
+| 肝豆状核 | ❌ 代谢综合征 (错) | ✅ 肝豆状核/帕金森 (对) |
+| 糖尿病临床表现 | ✅ 指南 (对) | ❌ 甲亢 (错!) |
+| 肺癌早期症状 | ✅ answer-only 干净 | ❌ 患者口语 (噪) |
+
+**结论: 无单一索引全胜**。jieba 词级在"整词匹配"场景优, 单字在"术语切碎"场景优, 但都各有关键失败。
+
+---
+
+## 3. 2026-08-06 修复实况 (本轮已完成)
+
+### 3.1 minimind 侧 (PC 活链 Index A)
+- **RAG 索引修复**: `cmd_build` 加 `med_only=True` (排除健康管理/理赔/销售); `cmd_query`/`cmd_chat` 补 `load_medical_dict()`; 重建 `rag_index.pkl`
+- **修复效果**: 上消化道出血/不孕不育 由"无匹配"→精准命中; 词典覆盖率缺失 57%→36%
+- **KB 病种覆盖修复** (esp32-ai 侧驱动): `build_guide_kb.py` 正则加 `变性/肝豆状核/黄斑变性` + 长度下限 80→40 + `is_medical_label` 过滤
+  - 肝豆状核变性 0→4 条, 戊型肝炎 0→1 条, 肱骨外上髁 0→2 条
+  - **KB 现 100% 医学** (11000 条, 非医学 6837→0)
+
+### 3.2 Index B 现状 (SD 死代码)
+- `data_v4/sd_rag/` 仍为 **08-03 构建** (36.5MB), **未随本次 KB 修复更新**
+- 但因 V5 死代码, 实际不影响 RAG 行为; 若未来激活需重跑 `build_sd_index.py`
+
+### 3.3 Index C 现状 (flash RAG1)
+- `data_v4/kb/index.bin` 随 build_guide_kb.py 重建 (2.05MB, 08-06), 但仅 v2/v4 字符级固件消费
+
+---
+
+## 4. 已知缺陷与根因
+
+| 缺陷 | 根因 | 修复状态 |
+|---|---|---|
+| jieba 术语切碎 (宫外孕/肝豆状核假匹配) | 医疗多字术语被默认词典切碎 | `medical_jieba.txt` 368 词条已加载; Index A 修复后肝豆状核命中 |
+| Index A 别名不可命中 (网球肘) | answer 60字截断 + 别名不匹配 | 已知限制 (设计权衡), 不改 |
+| send_prompt_rag.py 截断静默丢问题 | `ids[:keep]+ids[-4:]` 逻辑 | 已修复 (按预算截断证据, 保问题+assistant) |
+| IDF 98.3% 饱和 | ESP32 uint8 硬约束 (255 cap) | **不建议移除** — 加法打分下对排序无实质影响 |
+
+---
+
+## 5. 实际选择建议 (供决策)
+
+### 场景 A: 现状 V5 (tethered, PC 注入) — **推荐维持**
+- 活链 Index A (jieba) 已修复到最佳状态, KB 100% 医学
+- 生成质量: RAG 92-100% vs 无RAG 0% (决定性有效)
+- 速度: decode 影响 <2%, prefill 2.4x (可接受)
+- **无需任何进一步索引工作**
+
+### 场景 B: 需要离线 RAG (无 PC) — 需新决策
+- 当前 Index B (SD 137K) 是死代码; 若激活需:
+  1. 重跑 `build_sd_index.py` (用新 format_data.jsonl 医学 KB)
+  2. 移除/绕过 `MM_MINIMIND` 守卫
+  3. 但 BPE 编码器无法在 C/ESP32 实现 → 需改用字符级 tokenizer 固件 (v2/v4 线)
+- **代价**: 检索质量下降 (字符级), 需接受宫外孕/肝豆状核类术语的"切碎"局限
+- **结论**: 仅当离线是硬需求时选择; 当前 MiniMind 项目**明确不烧录/实机验证**, 无此需求
+
+### 场景 C: 追求检索质量上限 (实验性)
+- 第四种索引 (BPE 子词级) 可填补 jieba 与单字盲区, 但需 C 端 BPE 实现 (工作量大)
+- **不建议现在投入**
+
+---
+
+## 6. 决策树 (简版)
+
+```
+需要 RAG 吗?
+├─ 否 → 直接部署 H1/H2 (无 RAG, 泛化弱, 不推荐)
+└─ 是 → 允许 PC 联动?
+    ├─ 是 → V5 + Index A (jieba) ✅ 推荐 (当前已就绪)
+    └─ 否 (纯离线) → v3/v4 字符级固件 + Index C (flash kb)
+        └─ 需接受字符级检索局限 + 重新构建/烧录
+```
+
+---
+
+## 7. 结论
+
+1. **当前 V5 架构下, Index A (PC jieba) 是唯一正确选择, 且已修复到最佳状态** — 无需切换到 Index B/C
+2. Index B (SD 137K) 维持死代码, 不投入修复 (除非离线硬需求)
+3. Index C (flash RAG1) 仅 v2/v4 旧固件消费, 已随 KB 重建
+4. 真正值得的后续投入: **jieba 词典持续扩充** (医学词条 368→更多) + **KB 病种覆盖补充** (已部分完成)
