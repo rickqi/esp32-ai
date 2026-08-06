@@ -47,8 +47,36 @@ MEDICA_DIR = Path("/mnt/d/docs/raw/medica")
 
 
 def load_entries(max_docs):
-    """Load FULL KB: all V3 entries + all guide sections (no partition cap).
-    v2 (2026-08-06): 对齐 build_guide_kb 医学过滤 — is_medical_label + RE_CLINICAL_HEAD + doc_label."""
+    """Load medical-only KB for SD index.
+
+    v3 (2026-08-06): 优先直接读 format_data.jsonl (build_guide_kb.py 产出的
+    11K 100% 医学成品), 替代从 V3+guides 重建 — 消除保险/法务/健康管理对
+    医学检索的稀释 (Oracle 建议: 精度 > 召回).
+    Fallback: 若 format_data.jsonl 缺失, 退回 V3+guides 医学过滤重建.
+    """
+    entries = []
+
+    # 0. 首选: 医学成品 format_data.jsonl (build_guide_kb.py 产出)
+    if KB.exists():
+        with open(KB, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                q = (d.get("question", "") or "").strip()
+                a = (d.get("answer", "") or "").strip()
+                label = d.get("label", "")
+                if len(q) >= 3 and len(a) >= 20:
+                    entries.append((q, a, label))
+                if max_docs and len(entries) >= max_docs:
+                    return entries
+        if entries:
+            print(f"  format_data.jsonl entries: {len(entries)} (医学成品)")
+            return entries
+        print("  format_data.jsonl 为空, 退回 V3+guides 重建")
+
+    # 1. fallback: all V3 KB entries (V3 label 全为科室名, 防御性过滤)
     import sys as _sys
     _sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
     from chinese_v4.kb.build_guide_kb import (RE_NOISE_HEAD, RE_CLINICAL_HEAD,
@@ -56,8 +84,6 @@ def load_entries(max_docs):
     from chinese_v4.build_sft import split_by_headings, heading_to_questions
     from chinese_v4.prepare import clean_guide_md
 
-    entries = []
-    # 1. all V3 KB entries (V3 label 全为科室名, is_medical_label 实际保留全部, 防御性过滤)
     with open(V3_KB, encoding="utf-8", errors="replace") as f:
         for line in f:
             try:

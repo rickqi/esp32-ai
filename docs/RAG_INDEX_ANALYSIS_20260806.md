@@ -10,11 +10,11 @@
 | 维度 | **Index A: PC jieba** | Index B: 单字 SD | Index C: flash kb (RAG1) |
 |---|---|---|---|
 | 位置 | `minimind/out/rag_index.pkl` (PC) | `data_v4/sd_rag/{index,docs,meta}.bin` | `data_v4/kb/index.bin` |
-| 数据源 | `data_v4/kb/format_data.jsonl` (11000 医学) | V3 KB + 全量指南 (医学过滤, 113,609) | kb 采样 ~30K |
+| 数据源 | `data_v4/kb/format_data.jsonl` (11000 医学) | format_data.jsonl 医学成品 (10,999) | kb 采样 ~30K |
 | 检索 | jieba 词 IDF | 单字 IDF | 字符 IDF |
-| docs/terms | 11,000 / 29,849 (词) | 113,609 / 4,813 (字) | ~30K / char ids |
+| docs/terms | 11,000 / 29,849 (词) | 10,999 / 3,053 (字) | ~30K / char ids |
 | 证据长度 | 60 字 | 40 字 | 50 字 |
-| 大小 | 3.6MB | 47.5MB (SD 卡) | 2.05MB |
+| 大小 | 3.6MB | 3.9MB (SD 卡) | 2.05MB |
 | V5 使用 | ✅ **唯一活链** (PC 注入) | ❌ 死代码 (MM_MINIMIND) | ❌ 仅 v2/v4 |
 
 **架构事实**: `esp32_llm_zh_v5.ino:28` 定义 `MM_MINIMIND`; `:633` `#ifndef` 包裹 `rag_augment_prompt()` → 设备端检索(含 SD deep)永不执行。RAG 证据 100% 由 PC 端 jieba 检索 + MiniMind BPE 编码后串口注入。**SD 索引仅供 `esp32_llm_v5_idf` (离线 RAG 固件) 使用**。
@@ -69,14 +69,17 @@
   - 肝豆状核变性 0→4 条, 戊型肝炎 0→1 条, 肱骨外上髁 0→2 条
   - **KB 现 100% 医学** (11000 条, 非医学 6837→0)
 
-### 3.2 Index B 现状 (SD 索引已医学过滤重建, 已提交)
-- **2026-08-06 重建**: `build_sd_index.py` 对齐 `build_guide_kb` 医学过滤 (is_medical_label + RE_CLINICAL_HEAD + doc_label + body≥40)
-- 结果: **136,877 → 113,609 docs** (过滤 23,268 非医学/非临床), index.bin 32.17MB + docs.bin 15.35MB + meta 23.8KB = **47.5MB** (SD 卡容量充足)
-- **已提交推送**: esp32-ai commit `0b4c432` (含 3 文件 + 构建脚本 + 文档)
-- 检索验证: 肺癌/宫外孕/酮症酸中毒 命中更准; **肝豆状核/白疕 仍误配** (单字倒排结构性局限, 非数据问题)
+### 3.2 Index B 现状 (SD 索引: 11K 医学成品 v3, 已提交)
+- **2026-08-06 v3 重建**: `build_sd_index.py` 改为优先读 `format_data.jsonl` (build_guide_kb 产出的 11K 100% 医学成品), 回退 V3+guides 重建
+- **对比实测 (统一 10 查询)**: v3 (11K) **90% > v2 (113K) 80%**
+  - 肝豆状核: 113K 命中"梅核气"(错) → 11K 命中"肝豆状核"(对)
+  - 白疕: 113K 命中"白癜风"(近似错) → 11K 命中"白疕"(精准)
+  - Oracle 建议成立: 精度>召回, format_data.jsonl 病种覆盖修复后是高精度医学数据
+- 结果: **10,999 docs** (11K 医学成品), index.bin 2.46MB + docs.bin 1.40MB + meta 14.7KB = **3.9MB** (SD 卡容量充足, 且省 PSRAM)
+- **已提交推送**: esp32-ai commit (v3 脚本 + 11K 索引)
 - **部署**: 三文件拷入 SD 卡 `/sdcard/rag/` (FAT32) → `esp32_llm_v5_idf` 启动自动加载 (`rag_sd.h` 路径已硬编码)
 - 固件侧: `esp32_llm_v5_idf` 可直接消费 (格式未变); `esp32_llm_zh_v5` 维持死代码
-- **⚠️ 维护注意**: 此产物已在 git (0b4c432) 追踪; 若本地重跑 `build_sd_index.py` 会覆盖磁盘文件, 如需还原用 `git checkout 0b4c432 -- data_v4/sd_rag/`
+- **⚠️ 维护注意**: 此产物已在 git 追踪; 若本地重跑 `build_sd_index.py` 会覆盖磁盘文件, 如需还原用 `git checkout <commit> -- data_v4/sd_rag/`
 
 ### 3.3 Index C 现状 (flash RAG1)
 - `data_v4/kb/index.bin` 随 build_guide_kb.py 重建 (2.05MB, 08-06), 但仅 v2/v4 字符级固件消费
@@ -161,8 +164,8 @@ python3 chinese_v4/kb/build_guide_kb.py
 ### 索引文件清单 (最终确认)
 | 文件 | 大小 | 用途 |
 |---|---|---|
-| `esp32-ai/data_v4/sd_rag/index.bin` | 32.17MB | SD 离线 RAG (113,609 docs) |
-| `esp32-ai/data_v4/sd_rag/docs.bin` | 15.35MB | 证据文本 |
-| `esp32-ai/data_v4/sd_rag/meta.bin` | 23.8KB | 单字 IDF 表 |
+| `esp32-ai/data_v4/sd_rag/index.bin` | 2.46MB | SD 离线 RAG (10,999 docs, 11K 医学成品) |
+| `esp32-ai/data_v4/sd_rag/docs.bin` | 1.40MB | 证据文本 |
+| `esp32-ai/data_v4/sd_rag/meta.bin` | 14.7KB | 单字 IDF 表 |
 | `esp32-ai/data_v4/kb/index.bin` | 2.05MB | flash RAG1 (v2/v3) |
 | `minimind/out/rag_index.pkl` | 3.6MB | PC jieba (评估) |
