@@ -15,9 +15,9 @@
 | docs/terms | 11,000 / 29,849 (词) | 10,999 / 3,053 (字) | ~30K / char ids |
 | 证据长度 | 60 字 | 40 字 | 50 字 |
 | 大小 | 3.6MB | 3.9MB (SD 卡) | 2.05MB |
-| V5 使用 | ✅ **唯一活链** (PC 注入) | ❌ 死代码 (MM_MINIMIND) | ❌ 仅 v2/v4 |
+| V5 使用 | ✅ **PC 注入活链** | ⚠️ **IDF 变体键盘/预设路径活**; Arduino 死代码 | ❌ 仅 v2/v4 |
 
-**架构事实**: `esp32_llm_zh_v5.ino:28` 定义 `MM_MINIMIND`; `:633` `#ifndef` 包裹 `rag_augment_prompt()` → 设备端检索(含 SD deep)永不执行。RAG 证据 100% 由 PC 端 jieba 检索 + MiniMind BPE 编码后串口注入。**SD 索引仅供 `esp32_llm_v5_idf` (离线 RAG 固件) 使用**。
+**架构事实**: `esp32_llm_zh_v5.ino:28` 定义 `MM_MINIMIND`; `:633` `#ifndef` 包裹 `rag_augment_prompt()` → Arduino 变体设备端检索(含 SD deep)永不执行。**IDF 变体 (`esp32_llm_v5_idf`) SD RAG 已活**(有设备端 BPE 编码器), 键盘/预设路径走检索, UART ids 路径纯推理。详见 §9 支持矩阵。
 
 ---
 
@@ -169,3 +169,50 @@ python3 chinese_v4/kb/build_guide_kb.py
 | `esp32-ai/data_v4/sd_rag/meta.bin` | 14.7KB | 单字 IDF 表 |
 | `esp32-ai/data_v4/kb/index.bin` | 2.05MB | flash RAG1 (v2/v3) |
 | `minimind/out/rag_index.pkl` | 3.6MB | PC jieba (评估) |
+
+---
+
+## 9. V5 固件索引部署模式支持矩阵 (2026-08-06 代码实证)
+
+### 9.1 支持矩阵
+
+| 部署模式 | esp32_llm_zh_v5 (Arduino) | esp32_llm_v5_idf (ESP-IDF) |
+|---|---|---|
+| **(1) Flash RAG1 单文件** | ❌ 不支持 | ❌ 不支持 |
+| **(2) SD 三文件** | ❌ 死代码 (永不执行) | ✅ **键盘/预设路径已活** |
+| **(3) 分级 Flash+SD** | ❌ 无级联代码 | ❌ 无级联代码 (计划未落地) |
+
+### 9.2 关键代码证据
+
+| 事实 | 位置 |
+|---|---|
+| Arduino: `#define MM_MINIMIND` 无条件定义 | `esp32_llm_zh_v5.ino:28` |
+| Arduino: `rag_augment_prompt()` 被 `#ifndef MM_MINIMIND` 包裹 → 死代码 | `esp32_llm_zh_v5.ino:633-638` |
+| Arduino: `rag_init()`(flash mmap)+`ragsd_init()`(SD) 在 setup 调用但结果永不注入 | `esp32_llm_zh_v5.ino:869,871` |
+| Arduino: **无设备端 BPE 编码器** (证据注入靠 PC) | 无 bpe_encoder.h |
+| IDF: `rag_retrieval.c` 是 53 行 SD-only 封装, 只调 `ragsd_retrieve` | `rag_retrieval.c:34-52` |
+| IDF: **有设备端 BPE 编码器** (ByteLevel, 8/8 HF 匹配) | `bpe_encoder.h` |
+| IDF: SD RAG 活用于键盘/预设路径 | `board_rlcd.cpp:407,461` |
+| IDF: UART `{"ids":[]}` 路径纯推理 (PC 已编码) | `board_rlcd.cpp:677-696` |
+| 两个变体分区表均无 kb 分区 (model 占 14.5/16MB) | `partitions.csv` |
+| V5_TIERED_RAG_PLAN 分级架构为纯设计稿 (步骤 0/3 未实现) | `V5_TIERED_RAG_PLAN_20260806.md` |
+
+### 9.3 各模式部署结论
+
+**模式 (1) Flash RAG1**: ❌ 当前不可行。16MB flash 被 model (14.5MB) 占满, 剩余 ~24KB; RAG1 索引 2.05MB 无处放置。需缩 model (H1 版 ~8MB) 或换 ≥32MB flash 芯片。
+
+**模式 (2) SD 三文件**:
+- **IDF 变体已可用**: `data_v4/sd_rag/` 三文件 (11K v3 医学成品, 3.9MB) 拷入 SD 卡 `/sdcard/rag/`, 走键盘/预设输入路径 — **零代码改动**
+- **Arduino 变体需移植**: ① 拷 IDF 的 bpe_encoder.h/bpe_tables.h ② 写 build_rag_prompt 等价物 ③ 解除 MM_MINIMIND 守卫 ④ (可选) rag_sd.h 哈希表改动态
+
+**模式 (3) 分级**: ❌ 当前无级联代码。需先实现模式 (1) 的 flash tier (含 kb 分区), 再在 `rag_retrieval.c` 加 `#ifdef CONFIG_KB_PARTITION` flash→SD fallback 级联。
+
+### 9.4 部署路线建议
+
+```
+当前立即可用 (零改动): IDF 固件 + SD 卡 11K v3 索引 + 键盘/预设路径
+        ↓ (如需 Arduino 支持)
+中等工程量: 移植 BPE 编码器到 Arduino + 解除 MM_MINIMIND 守卫
+        ↓ (如需 flash/分级)
+需换硬件: 缩 model 或 32MB flash → 加 kb 分区 → flash tier + 分级级联
+```
