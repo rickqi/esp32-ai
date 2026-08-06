@@ -196,19 +196,8 @@ static int hid_keycode_to_ascii(uint8_t keycode, uint8_t modifier) {
     }
 }
 
-static void kbd_run_inference(const int *ids, int len) {
-    g_generating = true;
-    // 清空输出区 (保留边框/TUI)
-    ui_clear_rect(g_display, TEXT_LEFT, OUT_Y, TEXT_RIGHT, OUT_BOT);
-    g_display->RLCD_Display();
-
-    int64_t t0 = esp_timer_get_time();
-    static char out[1024];   // 静态: 避免 main task 栈溢出
-    int ob = llm_engine_generate(ids, len, out, sizeof(out), 60);
-    int64_t t1 = esp_timer_get_time();
-    out[ob] = 0;
-
-    // 显示生成结果 (输出区, 自动换行)
+// 渲染生成文本到输出区 (UTF-8 自动换行, 保留 TUI)
+static void render_output_text(const char *out, int ob) {
     int x = TEXT_LEFT, y = OUT_Y;
     const unsigned char *p = (const unsigned char *)out;
     int col = 0;
@@ -231,6 +220,21 @@ static void kbd_run_inference(const int *ids, int len) {
         ui_text(g_display, x, y, line);
     }
     g_display->RLCD_Display();
+}
+
+static void kbd_run_inference(const int *ids, int len) {
+    g_generating = true;
+    // 清空输出区 (保留边框/TUI)
+    ui_clear_rect(g_display, TEXT_LEFT, OUT_Y, TEXT_RIGHT, OUT_BOT);
+    g_display->RLCD_Display();
+
+    int64_t t0 = esp_timer_get_time();
+    static char out[1024];   // 静态: 避免 main task 栈溢出
+    int ob = llm_engine_generate(ids, len, out, sizeof(out), 60);
+    int64_t t1 = esp_timer_get_time();
+    out[ob] = 0;
+
+    render_output_text(out, ob);
     printf("{\"done\":true,\"tokens\":%d}\n", ob);
     ESP_LOGI(TAG, "generated %d chars", ob);
     // footer 统计: tok/s = 生成 token / 总耗时 (含 prefill)
@@ -395,6 +399,8 @@ static void handle_json_prompt(char *json) {
     int64_t t0 = esp_timer_get_time();
     int ob = llm_engine_generate(ids, n, out, sizeof(out), max);
     int64_t t1 = esp_timer_get_time();
+    out[ob] = 0;
+    render_output_text(out, ob);
     printf("{\"done\":true,\"tokens\":%d}\n", ob);
     ESP_LOGI(TAG, "generated %d chars", ob);
     // footer 统计
@@ -452,6 +458,11 @@ void board_loop(void) {
                     keyboard_ble_scan();
                 } else if (strcmp(line_buf, "SHOOT") == 0) {
                     take_screenshot();
+                } else if (strncmp(line_buf, "KEY ", 4) == 0) {
+                    // KEY <hex> — 模拟键盘按键 (0x51=Down, 0x52=Up, 0x28=Enter, 0x2B=Tab)
+                    uint8_t kc = (uint8_t)strtol(line_buf + 4, NULL, 16);
+                    ESP_LOGI(TAG, "KEY sim 0x%02x", kc);
+                    board_key_cb(kc, 0);
                 }
             } else if (c != '\r' && line_pos < LINE_BUF - 1) {
                 line_buf[line_pos++] = (char)c;
