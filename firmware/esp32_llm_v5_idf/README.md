@@ -85,8 +85,9 @@ BTFORGET       # 清除已存键盘 + NimBLE bonds (新增, 需在 board 层接�
 ## 烧录
 
 ```powershell
-# 固件 (0x10000) + 模型 (0x170000) + bootloader/partitions
-# 参考 tools/flash_v5.ps1 (需改 .bin 路径为 build/esp32_llm_v5.bin)
+# 固件 (0x10000) + 模型 (0x1D0000) + bootloader/partitions
+# 注意: factory 扩至 0x1C0000 (FULL 18129 字体), model 后移至 0x1D0000
+# 推荐用 tools/flash_v5.ps1 (自动前置校验 + 顺序烧录)
 esptool --chip esp32s3 --port COM3 write_flash 0x10000 build/esp32_llm_v5.bin
-esptool --chip esp32s3 --port COM3 write_flash 0x170000 ..\model_v5\H2\model_llm.bin
+esptool --chip esp32s3 --port COM3 write_flash 0x1D0000 ..\model_v5\H2\model_llm.bin
 ```

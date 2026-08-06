@@ -1,6 +1,7 @@
 # ============================================================
 # V5 IDF H2 烧录脚本 (Windows PowerShell)
-# 分区: bootloader 0x0 | partition 0x8000 | firmware 0x10000 | model 0x170000
+# 分区: bootloader 0x0 | partition 0x8000 | firmware 0x10000 | model 0x1D0000
+# 注意: factory 扩至 0x1C0000 (FULL 字体), model 后移至 0x1D0000
 # 前置: COM 口设备, IDF build 产物已存在
 # 用法: powershell -ExecutionPolicy Bypass -File flash_v5.ps1 [-Port COM4]
 # ============================================================
@@ -16,7 +17,7 @@ $files = @(
     @{ Path = "$BUILD\bootloader\bootloader.bin";            Addr = "0x0";      Desc = "bootloader" },
     @{ Path = "$BUILD\partition_table\partition-table.bin";   Addr = "0x8000";   Desc = "partition-table" },
     @{ Path = "$BUILD\esp32_llm_v5.bin";                     Addr = "0x10000";  Desc = "firmware" },
-    @{ Path = $MODEL;                                        Addr = "0x170000"; Desc = "model H2" }
+    @{ Path = $MODEL;                                        Addr = "0x1D0000"; Desc = "model H2" }
 )
 $missing = $false
 foreach ($f in $files) {
