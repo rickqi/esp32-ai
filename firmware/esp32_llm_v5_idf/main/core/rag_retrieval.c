@@ -35,7 +35,9 @@ int rag_retrieval_retrieve(const char *question, char *out_ev, int out_cap) {
     if (!g_rag_sd_ready || !question || !out_ev) return 0;
     uint32_t best[RAGSD_TOP_K];
     int scores[RAGSD_TOP_K];
-    int n = ragsd_retrieve(question, best, scores, 2);
+    // 单 doc 证据: Top-1 最相关, 减噪声 + 减 prompt (~20 token 生成空间).
+    // seq_len=128 硬上限下, prompt 75->55, 生成 53->73 token.
+    int n = ragsd_retrieve(question, best, scores, 1);
     if (n <= 0) return 0;
     // concatenate top evidence docs
     int ob = 0;

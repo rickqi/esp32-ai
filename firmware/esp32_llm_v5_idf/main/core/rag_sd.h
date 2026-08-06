@@ -42,7 +42,7 @@
 #define RAGSD_TOP_K      3
 #define RAGSD_MAX_Q      128
 #define RAGSD_MAX_DOCS   3          // evidence docs injected (2 used + slack)
-#define RAGSD_DOC_CAP    47         // max chars per evidence doc (matches rag.h)
+#define RAGSD_DOC_CAP    40         // max chars per evidence doc (与 PC 端 DOC_CHARS=40 一致)
 #define RAGSD_TERM_BONUS 600        // 术语命中加分 (压过纯单字噪声, 见 RAG_INDEX_ANALYSIS)
 #define RAGSD_OVERLAY_MAX_TERMS 512 // 词表上限 (当前 287)
 
