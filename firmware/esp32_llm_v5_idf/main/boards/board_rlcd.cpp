@@ -40,7 +40,7 @@ static const char *TAG = "board";
 
 // Firmware version label (header row2 right).  RULE: bump PATCH on every
 // user-visible change, MINOR on milestones.  See AGENTS.md.
-#define FW_VERSION "v5.3.0"
+#define FW_VERSION "v5.3.1"
 
 #define LINE_BUF 1024
 
@@ -574,8 +574,8 @@ static void take_screenshot(void) {
   for (size_t i = 0; i < b64_len; i += chunk) {
     int remain = (int)b64_len - (int)i;
     int len = (remain < chunk) ? remain : chunk;
-    // USB-Serial-JTAG 直接输出 (printf 会缓冲, 此处逐块写)
-    for (int k = 0; k < len; k++) usb_serial_jtag_write_bytes(&b64[i + k], 1, pdMS_TO_TICKS(100));
+    // USB-Serial-JTAG 分块写 (逐字节写 20K 太慢, 会阻塞数分钟)
+    usb_serial_jtag_write_bytes(&b64[i], len, pdMS_TO_TICKS(500));
   }
   usb_serial_jtag_write_bytes((const uint8_t *)"\n", 1, pdMS_TO_TICKS(100));
   printf("SCREENSHOT_END\n");
