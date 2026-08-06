@@ -108,8 +108,8 @@ def build_chatml_ids(tok, question, evidence, max_prompt=100):
     head = [im_start] + enc("system\n你是一个医学助手，请根据提供的参考资料准确回答问题。") + [im_end]
     head += enc("\n")
     head += [im_start] + enc("user\n")
-    # 问题 + assistant 引导 (必须完整)
-    q_part = enc("问题：" + question) + [im_end] + enc("\n")
+    # 问题 + assistant 引导 (必须完整) — MiniMind SFT: user 消息直接内容, 无"问题："前缀
+    q_part = enc(question) + [im_end] + enc("\n")
     tail = [im_start] + enc("assistant\n")
 
     ids = head + q_part + tail
