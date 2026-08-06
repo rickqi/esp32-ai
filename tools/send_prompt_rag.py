@@ -48,7 +48,7 @@ def terms_of(text):
     return set(t for t in jieba.cut(text) if t.strip() and t not in STOP_WORDS and not t.isspace())
 
 
-def load_kb():
+def load_kb(med_only=False):
     entries = []
     if not KB_PATH.exists():
         print(f"[warn] KB not found: {KB_PATH} — RAG 禁用")
@@ -57,7 +57,15 @@ def load_kb():
         for line in f:
             d = json.loads(line)
             entries.append((d.get("question", ""), d.get("answer", ""), d.get("label", "")))
+    if med_only:
+        entries = [e for e in entries if is_medical_label(e[2])]
     return entries
+
+
+def is_medical_label(label):
+    """排除保险/健康管理域 (与 minimind rag_medical.py 对齐)."""
+    NON_MEDICAL_KW = ['健康管理', '理赔', '产品条款', '销售', '消保']
+    return not any(k in label for k in NON_MEDICAL_KW)
 
 
 def build_index(entries):
@@ -174,11 +182,18 @@ def main():
     tok = Tokenizer.from_file(args.tokenizer)
     print(f"Tokenizer: {args.tokenizer} (vocab {tok.get_vocab_size()})")
 
-    # 检索索引 (惰性)
-    entries = load_kb()
+    # 检索索引 (惰性) — 医学词典 + med_only 过滤 (与 minimind rag_medical.py 对齐)
+    med_dict = r"D:\codes\minimind\out\medical_jieba.txt"
+    if os.path.exists(med_dict):
+        try:
+            jieba.load_userdict(med_dict)
+            print(f"[jieba] 加载医学词典: {med_dict}")
+        except Exception as exc:
+            print(f"[jieba] 词典加载失败: {exc}")
+    entries = load_kb(med_only=True)
     if entries and not args.no_rag:
         docs, inv, idf = build_index(entries)
-        print(f"KB: {len(docs)} docs, {len(idf)} terms (RAG 启用)")
+        print(f"KB: {len(docs)} docs, {len(idf)} terms (RAG 启用, 医学过滤)")
     else:
         docs, inv, idf = None, None, None
 
