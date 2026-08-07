@@ -5,6 +5,117 @@
 
 ---
 
+## 字体系统（cjk_font.h 全量升级 + 分区扩展）
+
+### 2026-08-06: 方案 B — 全量 CJK 字库 + 分区扩展
+
+> 详细分析见 `docs/FONT_SYSTEM_ANALYSIS.md`
+
+#### 变更概述
+
+从 xiaozhi-esp32 的 `font_noto_qwen_14_1.bin`（626KB，18129 字形）提取全量字符，
+替代原有 GB2312 子集（7854 字形），消除缺字 □ 显示。
+
+| 项 | 变更前 | 变更后 |
+|---|---|---|
+| 字形数 | 7,854 | **18,129** (+131%) |
+| 二进制大小 | 276 KB | **637 KB** (+361 KB) |
+| GB2312 CJK 覆盖 | 6,763 字 (98.7%，87 字缺) | **10,335 字 (152.8%)** ← 含繁体/CJK Ext-A |
+| 编码范围 | BMP (U+0000-9FFF 为主) | BMP + 补充平面 (U+0000-2CE93) |
+| 缺字 □ | 87 个 GB2312 字 | **0**（cbin 全量提取，零 missing） |
+| RAM 占用 | 0 | 0（不变，const Flash 直读） |
+| 渲染代码 | display.h 50 行 C | **零改动**（CJK_N 宏自动适配） |
+
+#### 各固件变体分配
+
+| 固件 | 字体模式 | glyphs | 分区变更 | 说明 |
+|---|---|---|---|---|
+| **v1** (esp32_llm_zh) | FULL | 18129 | factory 扩至 0x1C0000 | model 6.3MB 空间宽裕 |
+| **v2** (esp32_llm_zh_v2) | FULL | 18129 | factory 扩至 0x1C0000 | model 7.71MB < 8.19MB |
+| v3 (esp32_llm_zh_v3) | GB2312+vocab | 7854 | 不变 | model 8.81MB 无法缩分区 |
+| v5 (esp32_llm_zh_v5) | GB2312+vocab | 7854 | 不变 | model 14.05MB 无法缩分区 |
+| **v5_idf** | FULL | 18129 | 不变 | IDF 固件仅 264KB，天然放得下 |
+
+#### 分区表变更（v1/v2）
+
+```
+v2 partitions.csv:
+  factory:  0x10000, 0x160000 → 0x1C0000  (+400KB，容纳 637KB 字体)
+  model:    0x170000 → 0x1D0000 (起始地址变更!)
+  model大小: 0x890000 → 0x830000 (8.19MB，仍放得下 7.71MB model.bin)
+
+v1 partitions.csv:
+  factory:  0x10000, 0x160000 → 0x1C0000  (+400KB)
+  model:    0x170000 → 0x1D0000
+  model大小: 0xE80000 → 0xE20000 (14.13MB，6.3MB model 宽裕)
+```
+
+#### 如何使用
+
+**重新生成字体**（如需调整字符集）:
+```bash
+# 全量模式（18129 字形，Plan B）
+python chinese/gen_cjk_font_cbin.py --full --out firmware/esp32_llm_zh_v2/cjk_font.h
+
+# 默认模式（GB2312 + 模型词表，7854 字形）
+python chinese/gen_cjk_font_cbin.py --out firmware/esp32_llm_zh_v3/cjk_font.h
+
+# 限制字形数（适应小分区，移除最高码点的罕用字）
+python chinese/gen_cjk_font_cbin.py --full --max-glyphs 13000 --out path/to/cjk_font.h
+
+# 自定义 cbin 源
+python chinese/gen_cjk_font_cbin.py --full --cbin path/to/other_font.bin --out path/to/cjk_font.h
+```
+
+**v1/v2 烧录（分区变更后必须重烧分区表 + 模型）**:
+```powershell
+# 1. 烧录分区表（变更后必烧！）
+esptool --chip esp32s3 --port COM4 --baud 921600 write_flash 0x8000 firmware\esp32_llm_zh_v2\partitions.bin
+
+# 2. 烧录固件（地址不变）
+arduino-cli upload -p COM4 --fqbn <同上> firmware\esp32_llm_zh_v2
+# 或手动:
+esptool --chip esp32s3 --port COM4 --baud 921600 write_flash 0x10000 firmware\esp32_llm_zh_v2\esp32_llm_zh_v2.ino.bin
+
+# 3. 烧录模型到新地址（0x170000 → 0x1D0000!）
+esptool --chip esp32s3 --port COM4 --baud 921600 write_flash 0x1D0000 firmware\model_v2\model.bin
+
+# 4. v2 RAG 索引（地址不变）
+esptool --chip esp32s3 --port COM4 --baud 921600 write_flash 0xA00000 data_v2\kb\index.bin
+```
+
+**v5_idf 烧录（分区不变，直接用）**:
+```powershell
+# 固件 + 模型地址均不变，全量字体已编译进固件
+idf.py build
+esptool --chip esp32s3 --port COM3 write_flash 0x10000 build\esp32_llm_v5.bin
+esptool --chip esp32s3 --port COM3 write_flash 0x170000 ..\model_v5\H2\model_llm.bin
+```
+
+**编译**（复用缓存目录，避免 libsdetect 死锁）:
+```powershell
+python tools\manual_compile.py --build-dir D:\esp32-build-zh-v3-test
+```
+
+#### 脚本参数说明（gen_cjk_font_cbin.py）
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--full` | 关 | 提取 cbin 全部 18129 字形（Plan B） |
+| `--max-glyphs N` | 0 (无限) | 限制字形数，移除最高码点（罕用字）优先 |
+| `--cbin PATH` | xiaozhi-esp32 项目路径 | 指定 cbin 源字体文件 |
+| `--out PATH` | `firmware/esp32_llm_zh_v2/cjk_font.h` | 输出路径 |
+| `--tokenizer PATH` | `data_chinese/tokenizer.json` | 模型词表（仅默认模式用于补充字符） |
+
+#### 数据来源
+
+- cbin 源: `D:\codes\xiaozhi-esp32\managed_components\78__xiaozhi-fonts\cbin\font_noto_qwen_14_1.bin`
+  - 626KB, 1bpp, 162 cmap 段, 18129 字形
+  - 字符集来源: DeepSeek-R1 + Qwen3 tokenizer 语料
+- 分析文档: `docs/FONT_SYSTEM_ANALYSIS.md`
+
+---
+
 ## V5 环境（外部 MiniMind PLE 模型, model_v5）
 
 ### 2026-08-05: 键盘输入提示词 UI + BLE 键盘升级 + RAG 验证收尾
@@ -416,6 +527,7 @@
 | 08-01 | GPU 环境（RTX 5080） | 训练提速 10 倍 |
 | 08-01 | v2 医学数据环境 | 文本质量质变（真实医学内容） |
 | 08-01 | 4-bit group=32 + NaN 防护 | 部署产物干净可用 |
+| 08-07 | V5 H1-8B 部署定稿 | 8bit 量化 + S=256, 3.9x 快于 H2-4B, think 隐藏 + footer 时钟 |
 
 ## 版本对照
 

@@ -41,7 +41,7 @@ static const char *TAG = "board";
 
 // Firmware version label (header row2 right).  RULE: bump PATCH on every
 // user-visible change, MINOR on milestones.  See AGENTS.md.
-#define FW_VERSION "v5.3.4"
+#define FW_VERSION "v5.3.6"
 
 #define LINE_BUF 1024
 
@@ -353,30 +353,42 @@ static void stream_draw_char(int cp) {
 }
 
 // llm_token_cb_t: 追加 UTF-8 token 到输出区 (自动循环流式显示)
-// 仅隐藏 <think>/</think> 标签本身 (内容照常显示 — 未闭合时防止空白)
-static char s_think_buf[10];   // 跨 token 匹配 <think>/</think> 前缀
+// 完全隐藏 <think>...</think> 思考段 (标签+内容均不渲染).
+// 未闭合兜底: 思考段 token 超 THINK_MAX_TOKS 强制退出 (模型可能未输出闭合标签).
+#define THINK_MAX_TOKS 30
+static bool s_think_mode = false;
+static int  s_think_toks = 0;
+static char s_think_buf[10];   // 跨 token 匹配 <think/</think 前缀
 static int  s_think_bn = 0;
 
-static bool think_tag(const char *utf8, int len) {
+// 返回 1=进入think段, -1=退出think段, 0=非标签 (匹配 "<think"/"</think" 前缀, 防部分标签泄漏)
+static int think_tag(const char *utf8, int len) {
     for (int i = 0; i < len; i++) {
         if (s_think_bn >= (int)sizeof(s_think_buf)) s_think_bn = 0;
         s_think_buf[s_think_bn++] = utf8[i];
-        // 匹配 <think> (7) 或 </think> (8)
-        if (s_think_bn >= 7 && memcmp(s_think_buf + s_think_bn - 7, "<think>", 7) == 0) {
-            s_think_bn = 0; return true;
+        if (s_think_bn >= 7 && memcmp(s_think_buf + s_think_bn - 7, "</think", 7) == 0) {
+            s_think_bn = 0; return -1;
         }
-        if (s_think_bn >= 8 && memcmp(s_think_buf + s_think_bn - 8, "</think>", 8) == 0) {
-            s_think_bn = 0; return true;
+        if (s_think_bn >= 6 && memcmp(s_think_buf + s_think_bn - 6, "<think", 6) == 0) {
+            s_think_bn = 0; return 1;
         }
-        // 清理不可能成标签前缀的头部 (窗口限 9 字节)
         if (s_think_bn > 9) memmove(s_think_buf, s_think_buf + s_think_bn - 9, 9);
     }
-    return false;
+    return 0;
 }
 
 static void stream_token_cb(const char *utf8, int len, void *ctx) {
     (void)ctx;
-    if (think_tag(utf8, len)) return;   // 仅隐藏标签, 内容照常渲染
+    int tg = think_tag(utf8, len);
+    if (tg == 1) { s_think_mode = true; s_think_toks = 0; return; }
+    if (tg == -1) { s_think_mode = false; s_think_toks = 0; return; }
+    if (s_think_mode) {
+        if (++s_think_toks > THINK_MAX_TOKS) {
+            s_think_mode = false; s_think_toks = 0;   // 未闭合兜底: 显示后续回答
+        } else {
+            return;                                    // 隐藏思考内容
+        }
+    }
     for (int i = 0; i < len; i++) {
         // 防止 s_pend[4] 越界: 若缓冲满但非完整字符, 直接按字节丢弃
         if (s_pend_n >= 4) {

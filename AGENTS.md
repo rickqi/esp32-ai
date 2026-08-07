@@ -179,9 +179,23 @@ python tools/cjk_*.py          # CJK 显示/截图验证
 | 中文 v1 | `firmware/esp32_llm_zh/` | zh4-ds 12.5M | 5,904 | 无 | RLCD + CJK |
 | 中文 v2 | `firmware/esp32_llm_zh_v2/` | zh5-multi2/raft 13.7M | 6,594 | ✅ TF-IDF | RLCD + CJK |
 | 中文 v3 | `firmware/esp32_llm_zh_v3/` | zh6-raft 15.8M | 7,563 | ✅ | RLCD + CJK |
+| **V5 IDF** | `firmware/esp32_llm_v5_idf/` | **MiniMind H1-8B raft_v4**(6.3M→8bit 11.9MB) | 6,400 BPE | ✅ SD 10K | RLCD + CJK + footer |
 
 - v3 固件目录目前**只有 vocab.h**,`.ino`/display 尚未构建(蒸馏 WIP)。
 - 中文固件含 `cjk_font.h`(14×14 1bpp 字形,GB2312 ~98.7% 覆盖)+ SFT 标记 token 处理。
+
+### V5 IDF 部署要点(2026-08-07 实测)
+
+- **模型选择(H1-8B 定稿)**:H1 raft_v4 **8bit** S=256(11.9MB)vs H2 4bit(14.05MB)。
+  实测 **H1-8B 3.9× 快**(1.13 vs 0.29 tok/s)+ 生成完整(120 vs 40 tok 提前停)+ 8bit 质量高(复述证据+列表)。
+  H2 8bit(28MB)超出 model 分区 14.12MB;H2 4bit 量化退化(循环崩溃)。
+- **模型文件**:`firmware/model_v5/H1/model_llm.bin`(0x1D0000);H2 备选 `model_v5/H2/model_llm.bin`。
+- **采样参数**(llm_engine.c):temp=0.4, topk=40, **rep=1.0**。
+  raft 量化模型 logits 脆弱:rep=1.3 发散乱码,rep=1.0 复述但偶发循环(模型固有)。
+- **head staging**:`stage_head_int8` 支持 4bit(nibble)与 **8bit(直接拷贝)**——8bit 模型用错 4bit 解包会权重错乱(特殊 token `[buffer1]`/`<quad_` 泄漏)。
+- **think 标签**:`stream_token_cb` 完全隐藏 `<think>...</think>` 段(THINK_MAX_TOKS=30 未闭合兜底)。
+- **footer**:模型名(H1-8B)+ 日期时间(编译基准+elapsed,每秒刷新,离线无 RTC/NTP)。
+- **乱码排查史**:设备乱码曾因 ①head int8 激活量化(max_diff 4.2,48906c1 修复)②旧 verify.c 假 PASS(llm.h 无 q_norm + nan 比较恒 false)③gen_h2 测试 prompt[64] 截断。真实验证用 `verify_v5.c`(llm_v5.h 同款 + nan 敏感)。
 
 ## 显示层注意(中文固件)
 
