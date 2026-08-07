@@ -165,16 +165,23 @@ static const uint8_t UI_FONT_5X7[] = {
 };
 
 // ---- UTF-8 decode (returns codepoint, sets *consumed) ---------------------
+// 严格校验: 后续字节须 0x80-0xBF, 排除过度编码/代理区/非字符 —
+// ByteLevel BPE 可产生非法字节序列, 错误解码出怪异码点会显示 □.
 static inline int ui_utf8_decode(const unsigned char *s, int len, int *consumed) {
   unsigned char b0 = s[0];
   if (b0 < 0x80) { *consumed = 1; return b0; }
-  if ((b0 & 0xE0) == 0xC0 && len >= 2) {
-    *consumed = 2;
-    return ((b0 & 0x1F) << 6) | (s[1] & 0x3F);
+  if ((b0 & 0xE0) == 0xC0 && len >= 2 && (s[1] & 0xC0) == 0x80) {
+    int cp = ((b0 & 0x1F) << 6) | (s[1] & 0x3F);
+    if (cp >= 0x80) { *consumed = 2; return cp; }   // 排除 0xC0/0xC1 过度编码
   }
-  if ((b0 & 0xF0) == 0xE0 && len >= 3) {
-    *consumed = 3;
-    return ((b0 & 0x0F) << 12) | ((s[1] & 0x3F) << 6) | (s[2] & 0x3F);
+  if ((b0 & 0xF0) == 0xE0 && len >= 3 &&
+      (s[1] & 0xC0) == 0x80 && (s[2] & 0xC0) == 0x80) {
+    int cp = ((b0 & 0x0F) << 12) | ((s[1] & 0x3F) << 6) | (s[2] & 0x3F);
+    // UTF-8 规范: 排除代理区 0xD800-DFFF 与 0xFFFE/0xFFFF
+    if (cp >= 0x800 && !(cp >= 0xD800 && cp <= 0xDFFF) &&
+        cp != 0xFFFE && cp != 0xFFFF) {
+      *consumed = 3; return cp;
+    }
   }
   *consumed = 1;
   return -1;

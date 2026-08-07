@@ -41,7 +41,7 @@ static const char *TAG = "board";
 
 // Firmware version label (header row2 right).  RULE: bump PATCH on every
 // user-visible change, MINOR on milestones.  See AGENTS.md.
-#define FW_VERSION "v5.3.7"
+#define FW_VERSION "v5.3.8"
 
 #define LINE_BUF 1024
 
