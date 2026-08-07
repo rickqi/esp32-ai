@@ -33,7 +33,7 @@ static const uint8_t *g_model_base = NULL;
 // 现改为逐 group 累加 (与 llm_v5.h matvec_q8_range 一致)。
 static int8_t *s_head_w8 = NULL;       // [rows*cols] 解包 int8 权重 (-7..7)
 static uint16_t *s_head_scales = NULL; // [rows*n_groups] 每行每组 fp16 scale
-static int s_head_rows = 0, s_head_cols = 0, s_head_groups = 0;
+static int s_head_rows = 0, s_head_cols = 0, s_head_groups = 0, s_head_bits = 0;
 
 // head_matvec 覆盖: 用 staged int8 权重, 每 token 只读 PSRAM.
 // v3 (2026-08-06): 改用 fp32 激活 + 逐组反量化 — 消除 int8 激活量化的大误差
@@ -62,6 +62,7 @@ static int stage_head_int8(QT *t) {
   s_head_rows = t->rows;
   s_head_cols = t->cols;
   s_head_groups = t->n_groups;
+  s_head_bits = t->bits;
   if (s_head_cols <= 0 || s_head_groups <= 0) {
     ESP_LOGE(TAG, "head invalid rows/cols/groups %d/%d/%d", s_head_rows, s_head_cols, s_head_groups);
     return -1;
@@ -74,10 +75,16 @@ static int stage_head_int8(QT *t) {
   for (int r = 0; r < s_head_rows; r++) {
     const uint8_t *row = t->codes + (size_t)r * t->row_bytes;
     int8_t *dst = s_head_w8 + (size_t)r * s_head_cols;
-    for (int j = 0; j < s_head_cols; j++) {
-      uint8_t byte = row[j >> 1];
-      int code = (j & 1) ? (byte >> 4) : (byte & 0xF);
-      dst[j] = (int8_t)(code - 8);
+    if (t->bits == 8) {
+      // 8bit: codes 即 int8 (-127..127), 直接拷贝
+      memcpy(dst, row, (size_t)s_head_cols);
+    } else {
+      // 4bit: nibble 解包
+      for (int j = 0; j < s_head_cols; j++) {
+        uint8_t byte = row[j >> 1];
+        int code = (j & 1) ? (byte >> 4) : (byte & 0xF);
+        dst[j] = (int8_t)(code - 8);
+      }
     }
     // 保存每行全部 n_groups 个 fp16 scale (修复: 原只存 group0 的)
     memcpy(s_head_scales + (size_t)r * s_head_groups,
@@ -90,13 +97,14 @@ static int stage_head_int8(QT *t) {
   return 0;
 }
 
-float g_sampling_temp = 0.8f;
+float g_sampling_temp = 0.4f;   // 低 temp 提高确定性 (H1/H2 raft 量化模型 logits 脆弱, 0.8 发散)
 int   g_sampling_topk = 40;
-float g_repetition_penalty = 1.3f;
+float g_repetition_penalty = 1.0f;   // 1.3 过度惩罚致发散 (实测 raft 模型需 1.0)
 
 Model *llm_engine_model(void) { return &g_model; }
 Scratch *llm_engine_scratch(void) { return &g_scratch; }
 bool llm_engine_ready(void) { return g_ready; }
+int llm_engine_head_bits(void) { return s_head_bits; }
 
 // simple PRNG (matches Arduino xrng)
 static uint32_t rng_state = 42;

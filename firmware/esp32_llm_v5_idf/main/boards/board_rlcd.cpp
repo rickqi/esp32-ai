@@ -20,6 +20,7 @@
 #include "driver/uart.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include <time.h>
 #include "vocab.h"
 
 #include "board_rlcd.h"
@@ -145,12 +146,24 @@ static void ui_draw_header(void) {
 // 每个字段按实际字符数推进, 字段间留 GAP 像素, 无固定宽度步进.
 #define FTR_GAP 6   // 字段间像素间隙
 
+static void ui_draw_clock(int y);   // 前向声明 (footer 调用)
+
 static void ui_draw_footer(float tok_s, int ms, int ntok, int secs) {
     ui_fill_rect(g_display, TUI_LEFT, FTR_Y1, TUI_RIGHT, FTR_Y2);
     int y = FTR_Y1 + 2;
     char buf[24];
     int x = TEXT_LEFT;
     int w;   // 当前字段像素宽
+
+    // 模型名 (H1/H2 + 量化位数): 最左
+    if (llm_engine_ready()) {
+        const Model *mdl = llm_engine_model();
+        snprintf(buf, sizeof(buf), "%s-%dB",
+                 mdl->c.dim >= 384 ? "H2" : "H1", llm_engine_head_bits());
+        ui_text_inv(g_display, x, y, buf);
+        w = (int)strlen(buf) * UI_CW;
+        x += w + FTR_GAP;
+    }
 
     // t/s (7 字符固定)
     snprintf(buf, sizeof(buf), "%4.1ft/s", tok_s);
@@ -191,6 +204,49 @@ static void ui_draw_footer(float tok_s, int ms, int ntok, int secs) {
     snprintf(buf, sizeof(buf), "%ds", secs);
     ui_text_inv(g_display, x, y, buf);
 
+    // 日期时间: 右对齐 (与统计字段留间隙, 不重叠)
+    ui_draw_clock(y);
+
+    g_display->RLCD_Display();
+}
+
+// 时钟: 编译时间基准 + 运行 elapsed, 显示 "MM-DD HH:MM:SS" 右对齐.
+// 离线设备无 NTP/RTC, 以编译时间为基准 (重启后从编译时刻重新走时).
+static time_t s_clock_base = 0;
+static void clock_init(void) {
+    if (s_clock_base) return;
+    static const char *MON[] = {"Jan","Feb","Mar","Apr","May","Jun",
+                                "Jul","Aug","Sep","Oct","Nov","Dec"};
+    struct tm t = {0};
+    char mon[8]; int d, y, hh, mm, ss;
+    if (sscanf(__DATE__, "%7s %d %d", mon, &d, &y) == 3 &&
+        sscanf(__TIME__, "%d:%d:%d", &hh, &mm, &ss) == 3) {
+        for (int i = 0; i < 12; i++)
+            if (strcmp(MON[i], mon) == 0) { t.tm_mon = i; break; }
+        t.tm_mday = d; t.tm_year = y - 1900;
+        t.tm_hour = hh; t.tm_min = mm; t.tm_sec = ss;
+        s_clock_base = mktime(&t);
+    } else {
+        s_clock_base = 0;
+    }
+}
+
+static void ui_draw_clock(int y) {
+    clock_init();
+    // 时间字段固定右对齐: TUI_RIGHT-1 为右边界, 宽 14 字符 (MM-DD HH:MM:SS)
+    int cw = 14 * UI_CW;
+    int x0 = TUI_RIGHT - 1 - cw;
+    ui_fill_rect(g_display, x0, FTR_Y1, TUI_RIGHT, FTR_Y2);
+    char buf[20];
+    if (s_clock_base) {
+        time_t now = s_clock_base + (time_t)(esp_timer_get_time() / 1000000ULL);
+        struct tm *tm = localtime(&now);
+        if (tm) strftime(buf, sizeof(buf), "%m-%d %H:%M:%S", tm);
+        else snprintf(buf, sizeof(buf), "--:--:--");
+    } else {
+        snprintf(buf, sizeof(buf), "-- -- --:--");
+    }
+    ui_text_inv(g_display, x0, y, buf);
     g_display->RLCD_Display();
 }
 
@@ -763,13 +819,21 @@ void board_init(void) {
 void board_loop(void) {
     // RX 走 USB-Serial-JTAG (COM 口是原生 USB 枚举, 非 UART0 GPIO44)
     int loop_count = 0;
+    int64_t last_clock = 0;
     while (1) {
         if ((++loop_count % 5000) == 0) ESP_LOGI(TAG, "loop heartbeat %d", loop_count);
 
-        // 自动循环调度: 无输入空闲超时 -> 执行下一个预设
+        // 时钟: 每秒刷新底部时间字段 (同一位置循环刷新)
         int64_t now = esp_timer_get_time();
+        if (now - last_clock > 1000000) {
+            last_clock = now;
+            ui_draw_clock(FTR_Y1 + 2);
+        }
+
+        // 自动循环调度: 无输入空闲超时 -> 执行下一个预设
+        int64_t now2 = esp_timer_get_time();
         if (!g_generating && !g_auto_mode &&
-            now - g_last_activity > AUTO_IDLE_MS * 1000) {
+            now2 - g_last_activity > AUTO_IDLE_MS * 1000) {
             g_auto_mode = true;
             g_auto_idx = 0;
             ESP_LOGI(TAG, "auto mode start (idle %ds)", AUTO_IDLE_MS / 1000);

@@ -1,4 +1,4 @@
-/*
+﻿/*
  * llm_engine.h — V5 LLM inference engine (ESP-IDF).
  *
  * Wraps llm_v5.h (pure-C, framework-independent) + model loading from the
@@ -47,6 +47,8 @@ extern float g_repetition_penalty;
 // Model accessor (for RAG / direct logits).
 Model *llm_engine_model(void);
 Scratch *llm_engine_scratch(void);
+// 输出头量化位数 (4/8) — footer 模型名显示
+int llm_engine_head_bits(void);
 
 #ifdef __cplusplus
 }
