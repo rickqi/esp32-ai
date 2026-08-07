@@ -41,7 +41,7 @@ static const char *TAG = "board";
 
 // Firmware version label (header row2 right).  RULE: bump PATCH on every
 // user-visible change, MINOR on milestones.  See AGENTS.md.
-#define FW_VERSION "v5.3.6"
+#define FW_VERSION "v5.3.7"
 
 #define LINE_BUF 1024
 
@@ -307,8 +307,33 @@ static int hid_keycode_to_ascii(uint8_t keycode, uint8_t modifier) {
 
 // 渲染生成文本到输出区 (UTF-8 自动换行, 保留 TUI)
 static void render_output_text(const char *out, int ob) {
+    // 过滤 <think>...</think> 思考段 (键盘/JSON 路径不走 stream_token_cb, 需在此统一过滤).
+    // 未闭合兜底: 思考段字符超 THINK_MAX_CHARS 强制退出 (模型可能未输出闭合标签).
+    #define THINK_MAX_CHARS 120
+    static char filtered[2048];
+    int fo = 0;
+    bool in_think = false;
+    int think_chars = 0;
+    for (int i = 0; i < ob && fo < (int)sizeof(filtered) - 1; i++) {
+        if (!in_think) {
+            if (out[i] == '<' && i + 5 < ob && memcmp(out + i, "<think", 6) == 0) {
+                in_think = true; think_chars = 0; i += 5; continue;
+            }
+            filtered[fo++] = out[i];
+        } else {
+            // 匹配完整 </think> (8字节含 >), 防 > 残留
+            if (out[i] == '<' && i + 7 < ob && memcmp(out + i, "</think>", 8) == 0) {
+                in_think = false; think_chars = 0; i += 7; continue;
+            }
+            if (++think_chars > THINK_MAX_CHARS) {
+                in_think = false; think_chars = 0;   // 未闭合兜底: 显示后续回答
+            }
+        }
+    }
+    filtered[fo] = 0;
+
     int x = TEXT_LEFT, y = OUT_Y;
-    const unsigned char *p = (const unsigned char *)out;
+    const unsigned char *p = (const unsigned char *)filtered;
     int col = 0;
     char line[80];
     int lp = 0;
@@ -366,13 +391,17 @@ static int think_tag(const char *utf8, int len) {
     for (int i = 0; i < len; i++) {
         if (s_think_bn >= (int)sizeof(s_think_buf)) s_think_bn = 0;
         s_think_buf[s_think_bn++] = utf8[i];
-        if (s_think_bn >= 7 && memcmp(s_think_buf + s_think_bn - 7, "</think", 7) == 0) {
+        if (s_think_bn >= 8 && memcmp(s_think_buf + s_think_bn - 8, "</think>", 8) == 0) {
             s_think_bn = 0; return -1;
         }
         if (s_think_bn >= 6 && memcmp(s_think_buf + s_think_bn - 6, "<think", 6) == 0) {
             s_think_bn = 0; return 1;
         }
-        if (s_think_bn > 9) memmove(s_think_buf, s_think_buf + s_think_bn - 9, 9);
+        // 窗口限 9 字节: 保留最近 9 字节 (bn 同步更新, 防大 token 截断标签)
+        if (s_think_bn > 9) {
+            memmove(s_think_buf, s_think_buf + s_think_bn - 9, 9);
+            s_think_bn = 9;
+        }
     }
     return 0;
 }
