@@ -18,6 +18,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/uart.h"
+#include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include <time.h>
@@ -41,7 +42,7 @@ static const char *TAG = "board";
 
 // Firmware version label (header row2 right).  RULE: bump PATCH on every
 // user-visible change, MINOR on milestones.  See AGENTS.md.
-#define FW_VERSION "v5.3.9"
+#define FW_VERSION "v5.3.10"
 
 // 模型语言标识 (标题显示): ZH=中文模型, EN=英文模型.
 // 当前 H1/H2 raft_v4 均为中文医学; 未来英文模型部署时改为 "EN".
@@ -55,6 +56,20 @@ static const char *TAG = "board";
 #define LCD_DC   5
 #define LCD_CS   40
 #define LCD_RST  41
+
+// 板载按键 (Waveshare ESP32-S3-RLCD-4.2, 与 xiaozhi-esp32 一致, Active LOW 上拉):
+//   BOOT (GPIO0) = pwr 功能: 激活 BT 搜索配对键盘
+//   KEY  (GPIO18) = 下翻默认提示词 (轮流切换)
+#define BTN_PWR_GPIO GPIO_NUM_0
+#define BTN_KEY_GPIO GPIO_NUM_18
+#define BTN_DEBOUNCE_MS 40   // 消抖
+#define BTN_REPEAT_MS  400   // 长按连发间隔
+
+static bool s_btn_pwr_state = true;   // true=未按下 (上拉高)
+static bool s_btn_key_state = true;
+static int64_t s_btn_pwr_t0 = 0, s_btn_key_t0 = 0;
+static int64_t s_btn_pwr_last_act = 0, s_btn_key_last_act = 0;
+static bool s_bt_was_connected = false;
 
 // ---- UI layout (400x300, V3 同款 3-zone TUI) -------------------------------
 #define TUI_LEFT   1
@@ -828,6 +843,60 @@ static void handle_json_prompt(char *json) {
     ui_draw_footer(tok_s, ms_per_tok, ob, secs);
 }
 
+static void btns_init(void) {
+    gpio_config_t cfg = {
+        .pin_bit_mask = (1ULL << BTN_PWR_GPIO) | (1ULL << BTN_KEY_GPIO),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&cfg);
+    ESP_LOGI(TAG, "buttons: PWR=GPIO%d (BTSCAN), KEY=GPIO%d (preset next)",
+             BTN_PWR_GPIO, BTN_KEY_GPIO);
+}
+
+// 轮询按键 (board_loop 每 10ms): 消抖 + 下降沿触发 + 长按连发
+static void btns_poll(void) {
+    int64_t now = esp_timer_get_time();
+    // PWR (BOOT GPIO0): 单击 -> BTSCAN 搜索配对键盘; 长按连发 = 连续 BTSCAN 重试
+    bool pwr = gpio_get_level(BTN_PWR_GPIO);
+    if (pwr != s_btn_pwr_state) {
+        s_btn_pwr_t0 = now; s_btn_pwr_state = pwr;
+    } else if (!pwr && now - s_btn_pwr_t0 >= BTN_DEBOUNCE_MS * 1000 &&
+               now - s_btn_pwr_last_act >= BTN_REPEAT_MS * 1000) {
+        s_btn_pwr_last_act = now;
+        ESP_LOGI(TAG, "PWR btn: BTSCAN");
+        g_auto_mode = false;
+        g_last_activity = now;
+        keyboard_ble_scan();
+    }
+    // KEY (GPIO18): 单击/连发 -> 下翻预设 (轮流切换)
+    bool key = gpio_get_level(BTN_KEY_GPIO);
+    if (key != s_btn_key_state) {
+        s_btn_key_t0 = now; s_btn_key_state = key;
+    } else if (!key && now - s_btn_key_t0 >= BTN_DEBOUNCE_MS * 1000 &&
+               now - s_btn_key_last_act >= BTN_REPEAT_MS * 1000) {
+        s_btn_key_last_act = now;
+        ESP_LOGI(TAG, "KEY btn: preset %d -> %d", g_preset_idx, (g_preset_idx + 1) % KBD_PRESET_COUNT);
+        g_auto_mode = false;
+        g_last_activity = now;
+        g_preset_idx = (g_preset_idx + 1) % KBD_PRESET_COUNT;
+        g_kbd_mode = KBD_MODE_PRESET;
+        ui_draw_header();
+        ui_render_input();
+    }
+    // BLE 键盘连接上升沿 -> 自动切键盘输入模式 (TEXT)
+    bool conn = keyboard_ble_connected();
+    if (conn && !s_bt_was_connected) {
+        ESP_LOGI(TAG, "BLE keyboard connected -> KBD_MODE_TEXT");
+        g_kbd_mode = KBD_MODE_TEXT;
+        ui_draw_header();
+        ui_render_input();
+    }
+    s_bt_was_connected = conn;
+}
+
 void board_init(void) {
     ESP_LOGI(TAG, "board init (RLCD-4.2)");
 
@@ -859,6 +928,7 @@ void board_init(void) {
     g_last_activity = esp_timer_get_time();   // 自动循环计时起点
     ESP_LOGI(TAG, "board ready — keyboard UI: [Tab] preset/text, [Up/Dn] nav, [Enter] run");
     ESP_LOGI(TAG, "auto-demo: %ds idle -> loop presets (streaming)", AUTO_IDLE_MS / 1000);
+    btns_init();   // 板载按键 (PWR=BTSCAN, KEY=preset next)
 }
 
 void board_loop(void) {
@@ -867,6 +937,9 @@ void board_loop(void) {
     int64_t last_clock = 0;
     while (1) {
         if ((++loop_count % 5000) == 0) ESP_LOGI(TAG, "loop heartbeat %d", loop_count);
+
+        // 板载按键轮询 (PWR=BTSCAN, KEY=preset next, BLE连接->键盘模式)
+        btns_poll();
 
         // 时钟: 每秒刷新底部时间字段 (同一位置循环刷新)
         int64_t now = esp_timer_get_time();
