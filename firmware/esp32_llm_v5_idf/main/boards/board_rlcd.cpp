@@ -41,7 +41,11 @@ static const char *TAG = "board";
 
 // Firmware version label (header row2 right).  RULE: bump PATCH on every
 // user-visible change, MINOR on milestones.  See AGENTS.md.
-#define FW_VERSION "v5.3.8"
+#define FW_VERSION "v5.3.9"
+
+// 模型语言标识 (标题显示): ZH=中文模型, EN=英文模型.
+// 当前 H1/H2 raft_v4 均为中文医学; 未来英文模型部署时改为 "EN".
+#define MODEL_LANG "ZH"
 
 #define LINE_BUF 1024
 
@@ -113,15 +117,15 @@ static void ui_draw_frame(void) {
     g_display->RLCD_Display();
 }
 
-// 反色双行 header: row1 = 2x 标题, row2 = 键盘信息条 (BT/模式/预设位置)
+// 反色双行 header: row1 = 标题, row2 = 键盘信息条 (BT/模式/预设位置)
 static void ui_draw_header(void) {
-    // Row 1: 2x 反色标题居中
+    // Row 1: 反色标题居中 (普通字体, 无 X2 缩放)
     ui_fill_rect(g_display, TUI_LEFT + 1, HDR_Y1, TUI_RIGHT - 1, HDR_Y2);
-    const char *title = "ESP32-S3 PLE V5";
-    int tw = strlen(title) * UI_CW2;
+    const char *title = "ESP32-S3 PLE V5:" MODEL_LANG;
+    int tw = strlen(title) * UI_CW;
     int tx = TEXT_LEFT + (TEXT_RIGHT - TEXT_LEFT - tw) / 2;
     if (tx < TEXT_LEFT) tx = TEXT_LEFT;
-    ui_text_2x_inv(g_display, tx, HDR_Y1 + 1, title);
+    ui_text_inv(g_display, tx, HDR_Y1 + 2, title);
 
     // Row 2: 反色信息条 — 左:BT 状态 | 中:模式 | 右:版本号/输入长度
     // (右不再显示 [n/22] — 与输入区预设编号重复; 版本号对齐 V3 header 设计)
