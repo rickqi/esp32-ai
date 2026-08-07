@@ -44,7 +44,7 @@ static const char *TAG = "board";
 
 // Firmware version label (header row2 right).  RULE: bump PATCH on every
 // user-visible change, MINOR on milestones.  See AGENTS.md.
-#define FW_VERSION "v5.3.13"
+#define FW_VERSION "v5.3.15"
 
 // 模型语言标识 (标题显示): ZH=中文模型, EN=英文模型.
 // 当前 H1/H2 raft_v4 均为中文医学; 未来英文模型部署时改为 "EN".
@@ -93,7 +93,7 @@ static int64_t s_btn_boot_last_act = 0, s_btn_key_last_act = 0;
 static bool s_bt_was_connected = false;
 
 // ---- 板载按键轮询任务 (独立任务, 推理阻塞 board_loop 期间仍工作) ----------
-// 绕开 GPIO ISR 依赖 (实测 ISR 未触发), 每 20ms 轮询电平 + 消抖.
+// 仅读 GPIO0/GPIO18, 不配置其他引脚 (避免干扰显示/SD/console).
 static void btn_task(void *arg) {
     (void)arg;
     bool last_boot = true, last_key = true;
@@ -103,21 +103,27 @@ static void btn_task(void *arg) {
         int64_t now = esp_timer_get_time();
         bool b = gpio_get_level(BTN_BOOT_GPIO);
         bool k = gpio_get_level(BTN_KEY_GPIO);
-        // 诊断: 电平变化打印 (确认 GPIO 号/硬件)
+        // 诊断: 电平变化打印 (确认按键硬件)
         if (b != last_boot || k != last_key) {
             ESP_LOGI(TAG, "BTN lvl: boot=%d key=%d", b, k);
             last_boot = b; last_key = k;
         }
-        // BOOT 按下 (Active LOW): 消抖 40ms -> 触发 BTSCAN
-        if (!b && !boot_down) { boot_down = true; boot_down_t = now; }
-        else if (b && boot_down) { boot_down = false; }
-        if (boot_down && now - boot_down_t >= BTN_DEBOUNCE_US &&
-            now - s_btn_boot_last_act >= BTN_REPEAT_US) {
-            s_btn_boot_last_act = now;
-            s_btn_boot_pending = true;
-            llm_engine_request_stop();
-            ESP_LOGI(TAG, "BOOT btn: BTSCAN request");
+    // BOOT 按下 (Active LOW): 消抖 40ms -> BTSCAN toggle (开/关)
+    if (!b && !boot_down) { boot_down = true; boot_down_t = now; }
+    else if (b && boot_down) { boot_down = false; }
+    if (boot_down && now - boot_down_t >= BTN_DEBOUNCE_US &&
+        now - s_btn_boot_last_act >= BTN_REPEAT_US) {
+        s_btn_boot_last_act = now;
+        s_btn_boot_pending = true;
+        llm_engine_request_stop();
+        if (keyboard_ble_scanning() || keyboard_ble_pairing()) {
+            keyboard_ble_scan_stop();
+            ESP_LOGI(TAG, "BOOT btn: BTSCAN OFF");
+        } else {
+            keyboard_ble_scan();
+            ESP_LOGI(TAG, "BOOT btn: BTSCAN ON");
         }
+    }
         // KEY 按下: 消抖 40ms -> 预设下翻
         if (!k && !key_down) { key_down = true; key_down_t = now; }
         else if (k && key_down) { key_down = false; }
@@ -141,7 +147,7 @@ static void btns_init(void) {
         .intr_type = GPIO_INTR_NEGEDGE,   // Active LOW 下降沿
     };
     gpio_config(&cfg);
-    // 轮询任务替代 ISR (实测 GPIO ISR 未触发; 独立任务不受推理阻塞影响)
+    // 按键轮询任务 (独立任务, 推理期间仍工作; 仅读 GPIO0/18)
     xTaskCreate(btn_task, "btn_poll", 4096, NULL, 5, NULL);
     ESP_LOGI(TAG, "buttons: BOOT=GPIO%d (BTSCAN+stop), KEY=GPIO%d (preset next+run)",
              BTN_BOOT_GPIO, BTN_KEY_GPIO);
@@ -154,14 +160,14 @@ static void ui_render_input(void);
 // 处理按键事件 (board_loop 推理间隙执行; 长按连发由 REAPEAT 间隔控制)
 static void btns_handle(void) {
     int64_t now = esp_timer_get_time();
-    // BOOT: BTSCAN 搜索配对键盘 (连发间隔 400ms)
+    // BOOT: BTSCAN toggle 已在 btn_task 执行; 这里只打断 auto + 刷新 header
     if (s_btn_boot_pending && now - s_btn_boot_last_act >= BTN_REPEAT_US) {
         s_btn_boot_pending = false;
         s_btn_boot_last_act = now;
-        ESP_LOGI(TAG, "BOOT btn: BTSCAN");
+        ESP_LOGI(TAG, "BOOT btn handled (BTSCAN toggle)");
         g_auto_mode = false;
         g_last_activity = now;
-        keyboard_ble_scan();
+        ui_draw_header();   // BT:SCAN/OFF 状态刷新
     } else if (s_btn_boot_pending) {
         s_btn_boot_pending = false;   // 连发窗口内丢弃
     }

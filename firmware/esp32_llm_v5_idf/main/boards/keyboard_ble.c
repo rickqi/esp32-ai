@@ -426,6 +426,22 @@ void keyboard_ble_scan(void) {
     start_general_scan();
 }
 
+void keyboard_ble_scan_stop(void) {
+    if (s_is_scanning) {
+        ble_gap_disc_cancel();
+        s_is_scanning = 0;
+        s_reconnect_mode = 0;
+        ESP_LOGI(TAG, "BTSCAN stopped (disc cancelled)");
+    }
+    if (s_connect_in_progress) {
+        ble_gap_conn_cancel();
+        s_connect_in_progress = 0;
+        ESP_LOGI(TAG, "BTSCAN stopped (conn cancelled)");
+    }
+    s_scan_requested = 0;
+    s_connect_pending = 0;
+}
+
 esp_err_t keyboard_ble_clear_bonds(void) {
     ESP_LOGI(TAG, "Clearing bonds...");
     ble_store_clear();

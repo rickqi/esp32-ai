@@ -23,6 +23,9 @@ void keyboard_ble_init(void);
 // without -> 15s general scan, saves the first HID keyboard found to NVS.
 void keyboard_ble_scan(void);
 
+// Stop scanning / cancel in-progress connection (BOOT key toggle off).
+void keyboard_ble_scan_stop(void);
+
 // Is a keyboard connected?
 bool keyboard_ble_connected(void);
 
