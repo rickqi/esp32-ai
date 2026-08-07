@@ -184,6 +184,13 @@ python tools/cjk_*.py          # CJK 显示/截图验证
 - v3 固件目录目前**只有 vocab.h**,`.ino`/display 尚未构建(蒸馏 WIP)。
 - 中文固件含 `cjk_font.h`(14×14 1bpp 字形,GB2312 ~98.7% 覆盖)+ SFT 标记 token 处理。
 
+### ⚠️ V1-V3 维护状态(2026-08-07 决策: 冻结, 不再修复)
+
+- **V1-V3 固件 (esp32_llm / esp32_llm_zh / esp32_llm_zh_v2 / esp32_llm_zh_v3) 为旧代码, 已冻结, 不做任何新修复/新功能**。
+- 已知问题(不修): `stage_head_int8` 的 `n_groups==1` 假设 — 英文 v1 (D=96, G=128, n_groups=1) 实际成立无 bug; **中文 v2/v3 (D=160, G=32, n_groups=5) bug 真实存在**(head 只用 group0 scale), 但因已冻结 + 影响小(~0.05) + 被 V5 取代, **决定不修复**。
+- **模型导出注意**: `model_chinese/model.bin` 仍为 group=128(旧导出)。若用现 `chinese/export.py` (GROUP=32) 重导, head n_groups 会 2→5, 使 v1-zh 固件 Bug B 恶化 — **冻结期间禁止重导旧模型**。
+- **一切新开发/部署只走 V5 固件** (`firmware/esp32_llm_v5_idf/` + `esp32_llm_zh_v5/`)。修改旧固件前先确认是否必须(默认拒绝)。
+
 ### V5 IDF 部署要点(2026-08-07 实测)
 
 - **模型选择(H1-8B 定稿)**:H1 raft_v4 **8bit** S=256(11.9MB)vs H2 4bit(14.05MB)。
