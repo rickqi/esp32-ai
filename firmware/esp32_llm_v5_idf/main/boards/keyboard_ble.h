@@ -33,6 +33,11 @@ void keyboard_ble_on_key(key_cb_t cb);
 // Forget the saved keyboard + clear NimBLE bonds (NVS erased).
 esp_err_t keyboard_ble_clear_bonds(void);
 
+// BLE 状态 (UI header 显示 BT:SCAN/BT:PAIR/BT:ON/BT:OFF)
+bool keyboard_ble_scanning(void);     // 扫描中 (s_is_scanning)
+bool keyboard_ble_pairing(void);      // 连接建立中 (s_connect_in_progress || s_connect_pending)
+bool keyboard_ble_has_target(void);   // 已保存键盘地址 (g_have_target)
+
 #ifdef __cplusplus
 }
 #endif

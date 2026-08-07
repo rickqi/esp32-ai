@@ -44,6 +44,11 @@ extern float g_sampling_temp;
 extern int   g_sampling_topk;
 extern float g_repetition_penalty;
 
+// 推理中断: ISR/按键设置请求, generate 循环每 token 检查提前停止
+extern volatile bool g_stop_generation;
+void llm_engine_request_stop(void);
+void llm_engine_clear_stop(void);
+
 // Model accessor (for RAG / direct logits).
 Model *llm_engine_model(void);
 Scratch *llm_engine_scratch(void);

@@ -101,6 +101,11 @@ float g_sampling_temp = 0.4f;   // 低 temp 提高确定性 (H1/H2 raft 量化�
 int   g_sampling_topk = 40;
 float g_repetition_penalty = 1.0f;   // 1.3 过度惩罚致发散 (实测 raft 模型需 1.0)
 
+// 推理中断请求 (按键 ISR 置位, generate 每 token 检查)
+volatile bool g_stop_generation = false;
+void llm_engine_request_stop(void) { g_stop_generation = true; }
+void llm_engine_clear_stop(void)   { g_stop_generation = false; }
+
 Model *llm_engine_model(void) { return &g_model; }
 Scratch *llm_engine_scratch(void) { return &g_scratch; }
 bool llm_engine_ready(void) { return g_ready; }
@@ -235,6 +240,7 @@ int llm_engine_generate_stream(const int *prompt_ids, int prompt_len,
     int pos = prompt_len;
     int n_gen = 0;
     for (int step = 0; step < max_new && pos < S; step++) {
+        if (g_stop_generation) break;   // 按键中断: 提前停止
         int tok = sample_token(g_scratch.logits, V, g_sampling_temp,
                                g_sampling_topk, hist, hist_n,
                                g_repetition_penalty);

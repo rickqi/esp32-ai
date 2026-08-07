@@ -404,6 +404,10 @@ void keyboard_ble_on_key(key_cb_t cb) { g_key_cb = cb; }
 
 bool keyboard_ble_connected(void) { return g_connected; }
 
+bool keyboard_ble_scanning(void) { return s_is_scanning != 0; }
+bool keyboard_ble_pairing(void)  { return s_connect_in_progress != 0 || s_connect_pending != 0; }
+bool keyboard_ble_has_target(void) { return g_have_target; }
+
 void keyboard_ble_scan(void) {
     if (g_connected) { ESP_LOGI(TAG, "BTSCAN: already connected"); return; }
     if (s_connect_in_progress) {

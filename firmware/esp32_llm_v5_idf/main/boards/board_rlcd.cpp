@@ -42,7 +42,7 @@ static const char *TAG = "board";
 
 // Firmware version label (header row2 right).  RULE: bump PATCH on every
 // user-visible change, MINOR on milestones.  See AGENTS.md.
-#define FW_VERSION "v5.3.11"
+#define FW_VERSION "v5.3.12"
 
 // 模型语言标识 (标题显示): ZH=中文模型, EN=英文模型.
 // 当前 H1/H2 raft_v4 均为中文医学; 未来英文模型部署时改为 "EN".
@@ -57,19 +57,117 @@ static const char *TAG = "board";
 #define LCD_CS   40
 #define LCD_RST  41
 
+// ---- 键盘 UI 状态 (须在按键 ISR 处理之前定义) ------------------------------
+typedef enum {
+    KBD_MODE_PRESET = 0,   // 预设菜单
+    KBD_MODE_TEXT   = 1,   // ASCII 自由输入
+} KbdMode;
+
+static KbdMode g_kbd_mode = KBD_MODE_PRESET;
+static int g_preset_idx = 0;
+static char g_input_buf[80];      // 自由输入缓冲 (ASCII)
+static int g_input_len = 0;
+static bool g_generating = false;
+
+// ---- 自动循环演示状态 (须在按键 ISR 处理之前定义) ---------------------------
+#define AUTO_IDLE_MS    5000    // 无输入 5s 后启动自动循环
+#define AUTO_NEXT_MS    2000    // 每个预设完成后 2s 执行下一个
+static bool g_auto_mode = false;      // 自动循环激活中
+static int64_t g_last_activity = 0;   // 最后用户输入时间 (esp_timer us)
+static int g_auto_idx = 0;            // 自动循环当前预设
+
 // 板载按键 (Waveshare ESP32-S3-RLCD-4.2, 与 xiaozhi-esp32 一致, Active LOW 上拉):
-//   BOOT (GPIO0) = BOOT 键功能: 激活 BT 搜索配对键盘
-//   KEY  (GPIO18) = 下翻默认提示词 (轮流切换)
+//   BOOT (GPIO0) = 激活 BT 搜索配对键盘
+//   KEY  (GPIO18) = 中断当前推理 + 下翻预设并立即运行 (轮流切换)
 #define BTN_BOOT_GPIO GPIO_NUM_0
 #define BTN_KEY_GPIO GPIO_NUM_18
-#define BTN_DEBOUNCE_MS 40   // 消抖
-#define BTN_REPEAT_MS  400   // 长按连发间隔
+#define BTN_DEBOUNCE_US (40 * 1000)   // 消抖
+#define BTN_REPEAT_US   (400 * 1000)  // 长按连发间隔
 
-static bool s_btn_boot_state = true;   // true=未按下 (上拉高)
-static bool s_btn_key_state = true;
-static int64_t s_btn_boot_t0 = 0, s_btn_key_t0 = 0;
+// ISR 置位的事件标志 (推理阻塞 board_loop 期间仍捕获按键)
+static volatile bool s_btn_boot_pending = false;
+static volatile bool s_btn_key_pending = false;
+static volatile int64_t s_btn_boot_irq_t = 0;
+static volatile int64_t s_btn_key_irq_t = 0;
 static int64_t s_btn_boot_last_act = 0, s_btn_key_last_act = 0;
 static bool s_bt_was_connected = false;
+
+static void IRAM_ATTR btn_isr_boot(void *arg) {
+    (void)arg;
+    int64_t now = esp_timer_get_time();
+    if (now - s_btn_boot_irq_t < BTN_DEBOUNCE_US) return;   // 消抖
+    s_btn_boot_irq_t = now;
+    s_btn_boot_pending = true;
+    llm_engine_request_stop();    // 中断当前推理
+}
+static void IRAM_ATTR btn_isr_key(void *arg) {
+    (void)arg;
+    int64_t now = esp_timer_get_time();
+    if (now - s_btn_key_irq_t < BTN_DEBOUNCE_US) return;
+    s_btn_key_irq_t = now;
+    s_btn_key_pending = true;
+    llm_engine_request_stop();    // 中断当前推理
+}
+
+static void btns_init(void) {
+    gpio_config_t cfg = {
+        .pin_bit_mask = (1ULL << BTN_BOOT_GPIO) | (1ULL << BTN_KEY_GPIO),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_NEGEDGE,   // Active LOW 下降沿
+    };
+    gpio_config(&cfg);
+    gpio_install_isr_service(0);
+    gpio_isr_handler_add(BTN_BOOT_GPIO, btn_isr_boot, NULL);
+    gpio_isr_handler_add(BTN_KEY_GPIO, btn_isr_key, NULL);
+    ESP_LOGI(TAG, "buttons ISR: BOOT=GPIO%d (BTSCAN+stop), KEY=GPIO%d (preset next+run)",
+             BTN_BOOT_GPIO, BTN_KEY_GPIO);
+}
+
+// 前向声明 (btns_handle 在 UI 函数定义前使用)
+static void ui_draw_header(void);
+static void ui_render_input(void);
+
+// 处理按键事件 (board_loop 推理间隙执行; 长按连发由 REAPEAT 间隔控制)
+static void btns_handle(void) {
+    int64_t now = esp_timer_get_time();
+    // BOOT: BTSCAN 搜索配对键盘 (连发间隔 400ms)
+    if (s_btn_boot_pending && now - s_btn_boot_last_act >= BTN_REPEAT_US) {
+        s_btn_boot_pending = false;
+        s_btn_boot_last_act = now;
+        ESP_LOGI(TAG, "BOOT btn: BTSCAN");
+        g_auto_mode = false;
+        g_last_activity = now;
+        keyboard_ble_scan();
+    } else if (s_btn_boot_pending) {
+        s_btn_boot_pending = false;   // 连发窗口内丢弃
+    }
+    // KEY: 中断推理已由 ISR 请求; 下翻预设并立即运行
+    if (s_btn_key_pending && now - s_btn_key_last_act >= BTN_REPEAT_US) {
+        s_btn_key_pending = false;
+        s_btn_key_last_act = now;
+        ESP_LOGI(TAG, "KEY btn: stop gen, preset %d -> %d", g_preset_idx,
+                 (g_preset_idx + 1) % KBD_PRESET_COUNT);
+        g_auto_mode = true;
+        g_auto_idx = g_preset_idx = (g_preset_idx + 1) % KBD_PRESET_COUNT;
+        g_kbd_mode = KBD_MODE_PRESET;
+        g_last_activity = now - AUTO_NEXT_MS * 1000;   // 立即触发下一预设
+        ui_draw_header();
+        ui_render_input();
+    } else if (s_btn_key_pending) {
+        s_btn_key_pending = false;
+    }
+    // BLE 键盘连接上升沿 -> 自动切键盘输入模式 (TEXT)
+    bool conn = keyboard_ble_connected();
+    if (conn && !s_bt_was_connected) {
+        ESP_LOGI(TAG, "BLE keyboard connected -> KBD_MODE_TEXT");
+        g_kbd_mode = KBD_MODE_TEXT;
+        ui_draw_header();
+        ui_render_input();
+    }
+    s_bt_was_connected = conn;
+}
 
 // ---- UI layout (400x300, V3 同款 3-zone TUI) -------------------------------
 #define TUI_LEFT   1
@@ -97,24 +195,7 @@ static char line_buf[LINE_BUF];
 static int line_pos = 0;
 static DisplayPort *g_display = NULL;
 
-// ---- 键盘 UI 状态 -------------------------------------------------------
-typedef enum {
-    KBD_MODE_PRESET = 0,   // 预设菜单
-    KBD_MODE_TEXT   = 1,   // ASCII 自由输入
-} KbdMode;
-
-static KbdMode g_kbd_mode = KBD_MODE_PRESET;
-static int g_preset_idx = 0;
-static char g_input_buf[80];      // 自由输入缓冲 (ASCII)
-static int g_input_len = 0;
-static bool g_generating = false;
-
-// ---- 自动循环演示状态 (无输入时循环执行预设) ------------------------------
-#define AUTO_IDLE_MS    5000    // 无输入 5s 后启动自动循环
-#define AUTO_NEXT_MS    2000    // 每个预设完成后 2s 执行下一个
-static bool g_auto_mode = false;      // 自动循环激活中
-static int64_t g_last_activity = 0;   // 最后用户输入时间 (esp_timer us)
-static int g_auto_idx = 0;            // 自动循环当前预设
+// ---- 自动循环调度 (board_loop) ----------------------------------------------
 
 // 流式渲染上下文 (输出区光标)
 static int s_out_x = TEXT_LEFT, s_out_y = OUT_Y;
@@ -146,7 +227,14 @@ static void ui_draw_header(void) {
     // (右不再显示 [n/22] — 与输入区预设编号重复; 版本号对齐 V3 header 设计)
     ui_fill_rect(g_display, TUI_LEFT + 1, HDR2_Y1, TUI_RIGHT - 1, HDR2_Y2);
     int y = HDR2_Y1 + 1;
-    const char *bt = keyboard_ble_connected() ? "BT:ON " : "BT:OFF";
+    // 左:BT 状态 (优先级: 连接 > 配对 > 扫描 > 有目标 > 关闭)
+    // 配对/扫描中每 500ms 交替闪烁提示 (动态刷新由 board_loop 触发)
+    const char *bt;
+    if (keyboard_ble_connected())            bt = "BT:ON ";
+    else if (keyboard_ble_pairing())         bt = "BT:PAIR";
+    else if (keyboard_ble_scanning())        bt = "BT:SCAN";
+    else if (keyboard_ble_has_target())      bt = "BT:WAIT";
+    else                                     bt = "BT:OFF";
     ui_text_inv(g_display, TEXT_LEFT, y, bt);
     const char *mode = (g_kbd_mode == KBD_MODE_PRESET) ? "PRESET" : "TEXT";
     int mlen = strlen(mode);
@@ -843,60 +931,6 @@ static void handle_json_prompt(char *json) {
     ui_draw_footer(tok_s, ms_per_tok, ob, secs);
 }
 
-static void btns_init(void) {
-    gpio_config_t cfg = {
-        .pin_bit_mask = (1ULL << BTN_BOOT_GPIO) | (1ULL << BTN_KEY_GPIO),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    gpio_config(&cfg);
-    ESP_LOGI(TAG, "buttons: BOOT=GPIO%d (BTSCAN), KEY=GPIO%d (preset next)",
-             BTN_BOOT_GPIO, BTN_KEY_GPIO);
-}
-
-// 轮询按键 (board_loop 每 10ms): 消抖 + 下降沿触发 + 长按连发
-static void btns_poll(void) {
-    int64_t now = esp_timer_get_time();
-    // BOOT (GPIO0): 单击 -> BTSCAN 搜索配对键盘; 长按连发 = 连续 BTSCAN 重试
-    bool boot = gpio_get_level(BTN_BOOT_GPIO);
-    if (boot != s_btn_boot_state) {
-        s_btn_boot_t0 = now; s_btn_boot_state = boot;
-    } else if (!boot && now - s_btn_boot_t0 >= BTN_DEBOUNCE_MS * 1000 &&
-               now - s_btn_boot_last_act >= BTN_REPEAT_MS * 1000) {
-        s_btn_boot_last_act = now;
-        ESP_LOGI(TAG, "BOOT btn: BTSCAN");
-        g_auto_mode = false;
-        g_last_activity = now;
-        keyboard_ble_scan();
-    }
-    // KEY (GPIO18): 单击/连发 -> 下翻预设 (轮流切换)
-    bool key = gpio_get_level(BTN_KEY_GPIO);
-    if (key != s_btn_key_state) {
-        s_btn_key_t0 = now; s_btn_key_state = key;
-    } else if (!key && now - s_btn_key_t0 >= BTN_DEBOUNCE_MS * 1000 &&
-               now - s_btn_key_last_act >= BTN_REPEAT_MS * 1000) {
-        s_btn_key_last_act = now;
-        ESP_LOGI(TAG, "KEY btn: preset %d -> %d", g_preset_idx, (g_preset_idx + 1) % KBD_PRESET_COUNT);
-        g_auto_mode = false;
-        g_last_activity = now;
-        g_preset_idx = (g_preset_idx + 1) % KBD_PRESET_COUNT;
-        g_kbd_mode = KBD_MODE_PRESET;
-        ui_draw_header();
-        ui_render_input();
-    }
-    // BLE 键盘连接上升沿 -> 自动切键盘输入模式 (TEXT)
-    bool conn = keyboard_ble_connected();
-    if (conn && !s_bt_was_connected) {
-        ESP_LOGI(TAG, "BLE keyboard connected -> KBD_MODE_TEXT");
-        g_kbd_mode = KBD_MODE_TEXT;
-        ui_draw_header();
-        ui_render_input();
-    }
-    s_bt_was_connected = conn;
-}
-
 void board_init(void) {
     ESP_LOGI(TAG, "board init (RLCD-4.2)");
 
@@ -938,14 +972,15 @@ void board_loop(void) {
     while (1) {
         if ((++loop_count % 5000) == 0) ESP_LOGI(TAG, "loop heartbeat %d", loop_count);
 
-        // 板载按键轮询 (BOOT=BTSCAN, KEY=preset next, BLE连接->键盘模式)
-        btns_poll();
+        // 板载按键事件处理 (ISR 捕获, 推理间隙执行): BOOT=BTSCAN, KEY=preset next+run
+        btns_handle();
 
-        // 时钟: 每秒刷新底部时间字段 (同一位置循环刷新)
+        // 时钟: 每秒刷新底部时间 + BT 状态 (扫描/配对中实时更新)
         int64_t now = esp_timer_get_time();
         if (now - last_clock > 1000000) {
             last_clock = now;
             ui_draw_clock(FTR_Y1 + 2);
+            ui_draw_header();   // BT:SCAN/PAIR/ON/OFF 实时刷新
         }
 
         // 自动循环调度: 无输入空闲超时 -> 执行下一个预设
