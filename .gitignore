@@ -42,6 +42,15 @@ firmware/model_v3/
 firmware/esp32_llm_zh_v3/vocab.h
 chinese_v3/__pycache__/
 
+# chinese_v4 environment (independent, regenerable)
+# 保留追踪: data_v4/tokenizer.json, data_v4/kb/, data_v4/sd_rag/ (部署/RAG 产物)
+data_v4/corpus.txt
+data_v4/*.bin
+data_v4/sft/
+runs_v4/
+firmware/model_v4/
+chinese_v4/__pycache__/
+
 # raw video / recordings (demo footage — keep out of the repo)
 video/
 videos/
