@@ -21,6 +21,8 @@
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_system.h"
+#include "esp_rom_uart.h"
 #include <time.h>
 #include "vocab.h"
 
@@ -42,7 +44,7 @@ static const char *TAG = "board";
 
 // Firmware version label (header row2 right).  RULE: bump PATCH on every
 // user-visible change, MINOR on milestones.  See AGENTS.md.
-#define FW_VERSION "v5.3.12"
+#define FW_VERSION "v5.3.13"
 
 // 模型语言标识 (标题显示): ZH=中文模型, EN=英文模型.
 // 当前 H1/H2 raft_v4 均为中文医学; 未来英文模型部署时改为 "EN".
@@ -87,26 +89,47 @@ static int g_auto_idx = 0;            // 自动循环当前预设
 // ISR 置位的事件标志 (推理阻塞 board_loop 期间仍捕获按键)
 static volatile bool s_btn_boot_pending = false;
 static volatile bool s_btn_key_pending = false;
-static volatile int64_t s_btn_boot_irq_t = 0;
-static volatile int64_t s_btn_key_irq_t = 0;
 static int64_t s_btn_boot_last_act = 0, s_btn_key_last_act = 0;
 static bool s_bt_was_connected = false;
 
-static void IRAM_ATTR btn_isr_boot(void *arg) {
+// ---- 板载按键轮询任务 (独立任务, 推理阻塞 board_loop 期间仍工作) ----------
+// 绕开 GPIO ISR 依赖 (实测 ISR 未触发), 每 20ms 轮询电平 + 消抖.
+static void btn_task(void *arg) {
     (void)arg;
-    int64_t now = esp_timer_get_time();
-    if (now - s_btn_boot_irq_t < BTN_DEBOUNCE_US) return;   // 消抖
-    s_btn_boot_irq_t = now;
-    s_btn_boot_pending = true;
-    llm_engine_request_stop();    // 中断当前推理
-}
-static void IRAM_ATTR btn_isr_key(void *arg) {
-    (void)arg;
-    int64_t now = esp_timer_get_time();
-    if (now - s_btn_key_irq_t < BTN_DEBOUNCE_US) return;
-    s_btn_key_irq_t = now;
-    s_btn_key_pending = true;
-    llm_engine_request_stop();    // 中断当前推理
+    bool last_boot = true, last_key = true;
+    int64_t boot_down_t = 0, key_down_t = 0;
+    bool boot_down = false, key_down = false;
+    while (1) {
+        int64_t now = esp_timer_get_time();
+        bool b = gpio_get_level(BTN_BOOT_GPIO);
+        bool k = gpio_get_level(BTN_KEY_GPIO);
+        // 诊断: 电平变化打印 (确认 GPIO 号/硬件)
+        if (b != last_boot || k != last_key) {
+            ESP_LOGI(TAG, "BTN lvl: boot=%d key=%d", b, k);
+            last_boot = b; last_key = k;
+        }
+        // BOOT 按下 (Active LOW): 消抖 40ms -> 触发 BTSCAN
+        if (!b && !boot_down) { boot_down = true; boot_down_t = now; }
+        else if (b && boot_down) { boot_down = false; }
+        if (boot_down && now - boot_down_t >= BTN_DEBOUNCE_US &&
+            now - s_btn_boot_last_act >= BTN_REPEAT_US) {
+            s_btn_boot_last_act = now;
+            s_btn_boot_pending = true;
+            llm_engine_request_stop();
+            ESP_LOGI(TAG, "BOOT btn: BTSCAN request");
+        }
+        // KEY 按下: 消抖 40ms -> 预设下翻
+        if (!k && !key_down) { key_down = true; key_down_t = now; }
+        else if (k && key_down) { key_down = false; }
+        if (key_down && now - key_down_t >= BTN_DEBOUNCE_US &&
+            now - s_btn_key_last_act >= BTN_REPEAT_US) {
+            s_btn_key_last_act = now;
+            s_btn_key_pending = true;
+            llm_engine_request_stop();
+            ESP_LOGI(TAG, "KEY btn: preset next request");
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
 }
 
 static void btns_init(void) {
@@ -118,10 +141,9 @@ static void btns_init(void) {
         .intr_type = GPIO_INTR_NEGEDGE,   // Active LOW 下降沿
     };
     gpio_config(&cfg);
-    gpio_install_isr_service(0);
-    gpio_isr_handler_add(BTN_BOOT_GPIO, btn_isr_boot, NULL);
-    gpio_isr_handler_add(BTN_KEY_GPIO, btn_isr_key, NULL);
-    ESP_LOGI(TAG, "buttons ISR: BOOT=GPIO%d (BTSCAN+stop), KEY=GPIO%d (preset next+run)",
+    // 轮询任务替代 ISR (实测 GPIO ISR 未触发; 独立任务不受推理阻塞影响)
+    xTaskCreate(btn_task, "btn_poll", 4096, NULL, 5, NULL);
+    ESP_LOGI(TAG, "buttons: BOOT=GPIO%d (BTSCAN+stop), KEY=GPIO%d (preset next+run)",
              BTN_BOOT_GPIO, BTN_KEY_GPIO);
 }
 
