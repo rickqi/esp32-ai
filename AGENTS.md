@@ -201,11 +201,16 @@ python tools/cjk_*.py          # CJK 显示/截图验证
   raft 量化模型 logits 脆弱:rep=1.3 发散乱码,rep=1.0 复述但偶发循环(模型固有)。
 - **head staging**:`stage_head_int8` 支持 4bit(nibble)与 **8bit(直接拷贝)**——8bit 模型用错 4bit 解包会权重错乱(特殊 token `[buffer1]`/`<quad_` 泄漏)。
 - **think 标签**:`stream_token_cb` 完全隐藏 `<think>...</think>` 段(THINK_MAX_TOKS=30 未闭合兜底)。
-- **板载按键**(Waveshare 板, Active LOW 上拉, 轮询消抖 40ms/连发 400ms):
-  - **BOOT 键 (GPIO0)**: 单击 → `keyboard_ble_scan()` 搜索配对键盘 (BTSCAN)
-  - **KEY 键 (GPIO18)**: 单击/长按 → 下翻默认提示词 (g_preset_idx+1 轮流切换)
+- **板载按键**(Waveshare 板, Active LOW 上拉, **独立轮询任务** btn_task 每 20ms + 消抖 40ms/连发 400ms):
+  - **BOOT 键 (GPIO0)**: 单击 → **BTSCAN toggle**(空闲开扫描 / 扫描中关扫描); 同时中断当前推理
+  - **KEY 键 (GPIO18)**: 单击/长按 → 中断推理 + 下翻预设并立即运行 (g_preset_idx+1 轮流)
   - BLE 键盘连接上升沿 → 自动切 `KBD_MODE_TEXT` (键盘输入模式)
   - 注: 无独立 PWR 键 (USB-C 供电); GPIO0/GPIO18 与 xiaozhi-esp32 同板定义一致
+- **⚠️ INT WDT 禁用**(sdkconfig `CONFIG_ESP_INT_WDT` off): 300ms 中断超时对 BLE 扫描+推理高负载过紧,
+  实测持续触发 `TG1WDT_SYS_RST` 复位循环(每 ~2s 重启)→ 按键无响应/屏幕闪烁黑条纹/一切异常。
+  禁用后稳定; 若重新启用需调大超时 (如 1000ms)。
+- **BT 状态显示**(header): `BT:ON > BT:PAIR > BT:SCAN > BT:WAIT > BT:OFF` 优先级, 每秒刷新
+  (keyboard_ble 暴露 scanning/pairing/has_target getter)。
 - **footer**:模型名(H1-8B)+ 日期时间(编译基准+elapsed,每秒刷新,离线无 RTC/NTP)。
 - **乱码排查史**:设备乱码曾因 ①head int8 激活量化(max_diff 4.2,48906c1 修复)②旧 verify.c 假 PASS(llm.h 无 q_norm + nan 比较恒 false)③gen_h2 测试 prompt[64] 截断。真实验证用 `verify_v5.c`(llm_v5.h 同款 + nan 敏感)。
 

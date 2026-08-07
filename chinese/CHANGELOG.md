@@ -528,6 +528,7 @@ python tools\manual_compile.py --build-dir D:\esp32-build-zh-v3-test
 | 08-01 | v2 医学数据环境 | 文本质量质变（真实医学内容） |
 | 08-01 | 4-bit group=32 + NaN 防护 | 部署产物干净可用 |
 | 08-07 | V5 H1-8B 部署定稿 | 8bit 量化 + S=256, 3.9x 快于 H2-4B, think 隐藏 + footer 时钟 |
+| 08-07 | V5 板载按键启用 | BOOT=BTSCAN toggle, KEY=预设下翻, INT WDT 禁用修复重启循环 |
 
 ## 版本对照
 
