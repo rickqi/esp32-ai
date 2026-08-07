@@ -42,7 +42,7 @@ static const char *TAG = "board";
 
 // Firmware version label (header row2 right).  RULE: bump PATCH on every
 // user-visible change, MINOR on milestones.  See AGENTS.md.
-#define FW_VERSION "v5.3.10"
+#define FW_VERSION "v5.3.11"
 
 // 模型语言标识 (标题显示): ZH=中文模型, EN=英文模型.
 // 当前 H1/H2 raft_v4 均为中文医学; 未来英文模型部署时改为 "EN".
@@ -58,17 +58,17 @@ static const char *TAG = "board";
 #define LCD_RST  41
 
 // 板载按键 (Waveshare ESP32-S3-RLCD-4.2, 与 xiaozhi-esp32 一致, Active LOW 上拉):
-//   BOOT (GPIO0) = pwr 功能: 激活 BT 搜索配对键盘
+//   BOOT (GPIO0) = BOOT 键功能: 激活 BT 搜索配对键盘
 //   KEY  (GPIO18) = 下翻默认提示词 (轮流切换)
-#define BTN_PWR_GPIO GPIO_NUM_0
+#define BTN_BOOT_GPIO GPIO_NUM_0
 #define BTN_KEY_GPIO GPIO_NUM_18
 #define BTN_DEBOUNCE_MS 40   // 消抖
 #define BTN_REPEAT_MS  400   // 长按连发间隔
 
-static bool s_btn_pwr_state = true;   // true=未按下 (上拉高)
+static bool s_btn_boot_state = true;   // true=未按下 (上拉高)
 static bool s_btn_key_state = true;
-static int64_t s_btn_pwr_t0 = 0, s_btn_key_t0 = 0;
-static int64_t s_btn_pwr_last_act = 0, s_btn_key_last_act = 0;
+static int64_t s_btn_boot_t0 = 0, s_btn_key_t0 = 0;
+static int64_t s_btn_boot_last_act = 0, s_btn_key_last_act = 0;
 static bool s_bt_was_connected = false;
 
 // ---- UI layout (400x300, V3 同款 3-zone TUI) -------------------------------
@@ -845,28 +845,28 @@ static void handle_json_prompt(char *json) {
 
 static void btns_init(void) {
     gpio_config_t cfg = {
-        .pin_bit_mask = (1ULL << BTN_PWR_GPIO) | (1ULL << BTN_KEY_GPIO),
+        .pin_bit_mask = (1ULL << BTN_BOOT_GPIO) | (1ULL << BTN_KEY_GPIO),
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE,
     };
     gpio_config(&cfg);
-    ESP_LOGI(TAG, "buttons: PWR=GPIO%d (BTSCAN), KEY=GPIO%d (preset next)",
-             BTN_PWR_GPIO, BTN_KEY_GPIO);
+    ESP_LOGI(TAG, "buttons: BOOT=GPIO%d (BTSCAN), KEY=GPIO%d (preset next)",
+             BTN_BOOT_GPIO, BTN_KEY_GPIO);
 }
 
 // 轮询按键 (board_loop 每 10ms): 消抖 + 下降沿触发 + 长按连发
 static void btns_poll(void) {
     int64_t now = esp_timer_get_time();
-    // PWR (BOOT GPIO0): 单击 -> BTSCAN 搜索配对键盘; 长按连发 = 连续 BTSCAN 重试
-    bool pwr = gpio_get_level(BTN_PWR_GPIO);
-    if (pwr != s_btn_pwr_state) {
-        s_btn_pwr_t0 = now; s_btn_pwr_state = pwr;
-    } else if (!pwr && now - s_btn_pwr_t0 >= BTN_DEBOUNCE_MS * 1000 &&
-               now - s_btn_pwr_last_act >= BTN_REPEAT_MS * 1000) {
-        s_btn_pwr_last_act = now;
-        ESP_LOGI(TAG, "PWR btn: BTSCAN");
+    // BOOT (GPIO0): 单击 -> BTSCAN 搜索配对键盘; 长按连发 = 连续 BTSCAN 重试
+    bool boot = gpio_get_level(BTN_BOOT_GPIO);
+    if (boot != s_btn_boot_state) {
+        s_btn_boot_t0 = now; s_btn_boot_state = boot;
+    } else if (!boot && now - s_btn_boot_t0 >= BTN_DEBOUNCE_MS * 1000 &&
+               now - s_btn_boot_last_act >= BTN_REPEAT_MS * 1000) {
+        s_btn_boot_last_act = now;
+        ESP_LOGI(TAG, "BOOT btn: BTSCAN");
         g_auto_mode = false;
         g_last_activity = now;
         keyboard_ble_scan();
@@ -928,7 +928,7 @@ void board_init(void) {
     g_last_activity = esp_timer_get_time();   // 自动循环计时起点
     ESP_LOGI(TAG, "board ready — keyboard UI: [Tab] preset/text, [Up/Dn] nav, [Enter] run");
     ESP_LOGI(TAG, "auto-demo: %ds idle -> loop presets (streaming)", AUTO_IDLE_MS / 1000);
-    btns_init();   // 板载按键 (PWR=BTSCAN, KEY=preset next)
+    btns_init();   // 板载按键 (BOOT=BTSCAN, KEY=preset next)
 }
 
 void board_loop(void) {
@@ -938,7 +938,7 @@ void board_loop(void) {
     while (1) {
         if ((++loop_count % 5000) == 0) ESP_LOGI(TAG, "loop heartbeat %d", loop_count);
 
-        // 板载按键轮询 (PWR=BTSCAN, KEY=preset next, BLE连接->键盘模式)
+        // 板载按键轮询 (BOOT=BTSCAN, KEY=preset next, BLE连接->键盘模式)
         btns_poll();
 
         // 时钟: 每秒刷新底部时间字段 (同一位置循环刷新)

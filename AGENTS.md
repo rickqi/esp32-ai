@@ -201,6 +201,11 @@ python tools/cjk_*.py          # CJK 显示/截图验证
   raft 量化模型 logits 脆弱:rep=1.3 发散乱码,rep=1.0 复述但偶发循环(模型固有)。
 - **head staging**:`stage_head_int8` 支持 4bit(nibble)与 **8bit(直接拷贝)**——8bit 模型用错 4bit 解包会权重错乱(特殊 token `[buffer1]`/`<quad_` 泄漏)。
 - **think 标签**:`stream_token_cb` 完全隐藏 `<think>...</think>` 段(THINK_MAX_TOKS=30 未闭合兜底)。
+- **板载按键**(Waveshare 板, Active LOW 上拉, 轮询消抖 40ms/连发 400ms):
+  - **BOOT 键 (GPIO0)**: 单击 → `keyboard_ble_scan()` 搜索配对键盘 (BTSCAN)
+  - **KEY 键 (GPIO18)**: 单击/长按 → 下翻默认提示词 (g_preset_idx+1 轮流切换)
+  - BLE 键盘连接上升沿 → 自动切 `KBD_MODE_TEXT` (键盘输入模式)
+  - 注: 无独立 PWR 键 (USB-C 供电); GPIO0/GPIO18 与 xiaozhi-esp32 同板定义一致
 - **footer**:模型名(H1-8B)+ 日期时间(编译基准+elapsed,每秒刷新,离线无 RTC/NTP)。
 - **乱码排查史**:设备乱码曾因 ①head int8 激活量化(max_diff 4.2,48906c1 修复)②旧 verify.c 假 PASS(llm.h 无 q_norm + nan 比较恒 false)③gen_h2 测试 prompt[64] 截断。真实验证用 `verify_v5.c`(llm_v5.h 同款 + nan 敏感)。
 
