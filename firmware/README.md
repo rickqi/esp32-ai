@@ -100,8 +100,13 @@ firmware/common/llm.h    # PLE 推理核心（版本无关，读 header 动态�
 | 版本 | 烧录内容 |
 |---|---|
 | 英文 | 固件 + model.bin(0x170000) |
-| 中文 v1 | 固件 + model.bin(0x170000) |
-| 中文 v2 | 固件 + model.bin(0x170000) + **kb 索引(0xA00000)** |
+| 中文 v1 | 固件 + model.bin(**0x1D0000**) + **partitions.bin(0x8000)** ← 分区变更 |
+| 中文 v2 | 固件 + model.bin(**0x1D0000**) + **partitions.bin(0x8000)** + kb 索引(0xA00000) ← 分区变更 |
+| 中文 v3 | 固件 + model.bin(0x170000) + kb 索引(0xA60000) ← 分区不变 |
+| 中文 v5 | 固件 + model.bin(0x170000) ← 分区不变 |
+| v5_idf | 固件(0x10000) + model_llm.bin(0x170000) ← 分区不变 |
+
+> ⚠️ **v1/v2 分区变更（2026-08-06）**: factory 从 0x160000 扩至 0x1C0000（+400KB）以容纳全量 CJK 字库（18129 字形 / 637KB）。model 起始地址从 0x170000 变为 **0x1D0000**。首次烧录必须先刷 `partitions.bin`，否则分区表与固件不匹配。
 
 ## RAG 索引存放位置（v2）
 
@@ -116,16 +121,16 @@ D:\codes\esp32-ai\data_v2\kb\                  ← 知识库目录
 ### 🎯 烧录位置（设备端）
 
 ```
-ESP32-S3 Flash 分区布局 (16MB):
-┌─────────────────────────────────────┐
-│ nvs       0x9000   (20KB)          │
-│ factory   0x10000  (1.375MB 固件)  │
-│ model     0x170000 (8.5MB 模型)    │
-│ kb        0xA00000 (2MB 索引) ★    │
-│ coredump  0xFF0000 (64KB)          │
-└─────────────────────────────────────┘
+ESP32-S3 Flash 分区布局 (16MB) — v2（2026-08-06 更新）:
+┌──────────────────────────────────────────┐
+│ nvs       0x9000    (20KB)              │
+│ factory   0x10000   (1.75MB 固件+全量字库)│ ← 扩展 +400KB
+│ model     0x1D0000  (8.19MB 模型)        │ ← 地址变更!
+│ kb        0xA00000  (2MB 索引) ★         │
+│ coredump  0xFF0000  (64KB)              │
+└──────────────────────────────────────────┘
 
-kb 分区: 0xA00000 起，2MB 容量（索引 1.83MB 放得下）
+v1/v3/v5 布局不同，参见各自 partitions.csv
 ```
 
 ### 🔄 设备端使用流程
@@ -162,3 +167,41 @@ rag_init()
 | 精准问答 | ❌ | ❌ | ⚠️ RAG 辅助（证据引用） |
 | 推理速度 | 9.5 tok/s | ~2 tok/s | ~2 tok/s |
 | 知识库 | 无 | 无 | **✅ 1.83MB 设备端** |
+
+---
+
+## CJK 字体系统
+
+### 字体格式
+
+所有中文固件使用 `cjk_font.h`（14×14 1bpp 点阵字库），格式:
+```c
+#define CJK_N 18129           // 字形数（FULL 模式）或 7854（GB2312 模式）
+static const uint32_t CJK_CP[N];    // Unicode 码点（排序，二分搜索）
+static const uint32_t CJK_OFF[N];   // CJK_BLOB 偏移
+static const uint8_t  CJK_BLOB[];   // 字形位图（每字 28 字节）
+```
+渲染: `display.h` 中 `cjk_find()` 二分搜索 + `rlcd_draw_cjk()` 逐像素绘制。零 RAM，全 Flash 直读。
+
+### 两种模式
+
+| 模式 | 字形数 | 大小 | 覆盖 | 适用 |
+|---|---|---|---|---|
+| **FULL** (`--full`) | 18,129 | 637KB | CJK 全量（含繁体/Ext-A） | v1, v2, v5_idf |
+| GB2312+vocab（默认） | 7,854 | 276KB | GB2312 98.7% | v3, v5（分区受限） |
+
+### 重新生成
+
+```bash
+# 全量模式（Plan B，18129 字形）
+python chinese/gen_cjk_font_cbin.py --full --out firmware/esp32_llm_zh_v2/cjk_font.h
+
+# 默认模式（GB2312 + 模型词表，7854 字形）
+python chinese/gen_cjk_font_cbin.py --out firmware/esp32_llm_zh_v3/cjk_font.h
+
+# 限制字形数（适应小分区）
+python chinese/gen_cjk_font_cbin.py --full --max-glyphs 13000 --out path/cjk_font.h
+```
+
+> 数据来源: xiaozhi-esp32 `font_noto_qwen_14_1.bin`（626KB，18129 字形）
+> 详细分析: `docs/FONT_SYSTEM_ANALYSIS.md`

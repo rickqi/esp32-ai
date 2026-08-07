@@ -1,5 +1,6 @@
-# factory enlarged to 1.375MB (WiFi+SD+ADC increased firmware size)
+# factory enlarged to 1.75MB (+400KB for full CJK font 18129 glyphs)
+# model shrunk from 0xE80000 to 0xE20000 (14.13MB, fits 6.3MB model easily)
 nvs,       data, nvs,     0x9000,    0x5000,
-factory,   app,  factory, 0x10000,   0x160000,
-model,     data, 0x40,    0x170000,  0xE80000,
+factory,   app,  factory, 0x10000,   0x1C0000,
+model,     data, 0x40,    0x1D0000,  0xE20000,
 coredump,  data, coredump,0xFF0000,  0x10000,

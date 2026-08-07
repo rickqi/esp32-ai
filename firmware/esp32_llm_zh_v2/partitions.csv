@@ -1,6 +1,8 @@
-# v2 RAG layout: model 8.5MB (7.71MB binary) + kb 2MB (1.83MB index)
+# v2 RAG layout: model 8.2MB (7.71MB binary) + kb 2MB (1.83MB index)
+# factory expanded 0x160000→0x1C0000 (+400KB) for full CJK font (18129 glyphs, 637KB)
+# model shrunk 0x890000→0x830000 (8.19MB, still fits 7.71MB model.bin with 480KB headroom)
 nvs,       data, nvs,     0x9000,    0x5000,
-factory,   app,  factory, 0x10000,   0x160000,
-model,     data, 0x40,    0x170000,  0x890000,
+factory,   app,  factory, 0x10000,   0x1C0000,
+model,     data, 0x40,    0x1D0000,  0x830000,
 kb,        data, 0x41,    0xA00000,  0x200000,
 coredump,  data, coredump,0xFF0000,  0x10000,
